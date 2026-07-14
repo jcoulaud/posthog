@@ -1096,10 +1096,15 @@ def create_run(
     mode: str = "background",
     extra_state: dict | None = None,
     branch: str | None = None,
+    acting_user_id: int | None = None,
 ) -> contracts.TaskRunDTO:
-    """Create a new run for an existing task (e.g. resuming an interactive sandbox session)."""
+    """Create a new run for an existing task (e.g. resuming an interactive sandbox session).
+
+    ``acting_user_id`` attributes the run to the user whose AI run preferences should apply
+    when ``extra_state`` pins no runtime selection; it falls back to the task's creator.
+    """
     task = Task.objects.get(id=task_id)
-    run = task.create_run(mode=mode, extra_state=extra_state, branch=branch)
+    run = task.create_run(mode=mode, extra_state=extra_state, branch=branch, acting_user_id=acting_user_id)
     return _task_run_to_dto(run, task=task)
 
 
@@ -3498,7 +3503,9 @@ def bootstrap_task_run(
     logger.info(
         "Creating task run for task %s with mode=%s, branch=%s, environment=%s", task.id, mode, branch, environment
     )
-    run = task.create_run(environment=environment, mode=mode, branch=branch, extra_state=extra_state)
+    run = task.create_run(
+        environment=environment, mode=mode, branch=branch, extra_state=extra_state, acting_user_id=user_id
+    )
 
     if imported_mcp_servers or relayed_mcp_servers:
         update_fields = ["updated_at"]
@@ -4156,6 +4163,16 @@ def create_task(team_id: int, user_id: int | None, *, validated_data: dict) -> c
         and len(validated_data.get("repositories", [])) <= 1
         and user_id is not None
     ):
+        # Post-defaults comparison: warm runs are provisioned with the default triple
+        # filled in, so the requested selection must be resolved the same way to match.
+        warm_selection = _with_ai_run_defaults(
+            {"runtime_adapter": warm_runtime_adapter, "model": warm_model, "reasoning_effort": warm_reasoning_effort},
+            team_id=team_id,
+            acting_user_id=user_id,
+        )
+        warm_runtime_adapter = warm_selection.get("runtime_adapter")
+        warm_model = warm_selection.get("model")
+        warm_reasoning_effort = warm_selection.get("reasoning_effort")
         warm_run = _find_idling_warm_run(
             team_id,
             user_id,
@@ -4509,6 +4526,38 @@ def can_mint_readonly_github_token(team_id: int) -> bool:
     return _can_mint(team_id)
 
 
+def _with_ai_run_defaults(data: dict, *, team_id: int, acting_user_id: int | None, internal: bool = False) -> dict:
+    """A copy of ``data`` with the team/user default AI run triple filled in when it pins
+    no runtime selection (see ``resolve_ai_run_selection``).
+
+    Applied ahead of warm-run matching so requests and warm runs compare post-defaults —
+    a warm run provisioned under the default triple must match a submit that pinned
+    nothing. ``Task.create_run`` applies the same resolution as a safety net for every
+    other path, so this is deterministic double-resolution, not a divergence.
+    """
+    if internal:
+        return data
+    from products.tasks.backend.logic.services.ai_run_defaults import (  # noqa: PLC0415 — keep ORM-heavy logic services off the api import path
+        resolve_ai_run_selection,
+    )
+
+    resolved = resolve_ai_run_selection(
+        team_id,
+        acting_user_id,
+        runtime_adapter=data.get("runtime_adapter"),
+        model=data.get("model"),
+        reasoning_effort=data.get("reasoning_effort"),
+    )
+    if resolved.source not in ("user", "team"):
+        return data
+    updated = dict(data)
+    updated["runtime_adapter"] = resolved.runtime_adapter
+    updated["model"] = resolved.model
+    if resolved.reasoning_effort:
+        updated["reasoning_effort"] = resolved.reasoning_effort
+    return updated
+
+
 def _find_idling_warm_run(
     team_id: int,
     user_id: int | None,
@@ -4741,6 +4790,17 @@ def warm_task_sandbox(
         if custom_image is None or not custom_image.is_ready:
             return None
 
+    # Resolve team/user defaults up front so the warm run is provisioned (and later
+    # matched) on the runtime the activating submit will effectively request.
+    warm_selection = _with_ai_run_defaults(
+        {"runtime_adapter": runtime_adapter, "model": model, "reasoning_effort": reasoning_effort},
+        team_id=team_id,
+        acting_user_id=user_id,
+    )
+    runtime_adapter = warm_selection.get("runtime_adapter")
+    model = warm_selection.get("model")
+    reasoning_effort = warm_selection.get("reasoning_effort")
+
     existing = _find_idling_warm_run(
         team_id,
         user_id,
@@ -4831,6 +4891,15 @@ def run_task(
     is_pi_task = task.runtime == Task.Runtime.PI
 
     if not resume_from_run_id:
+        # Fill team/user default AI run preferences before warm matching: a warm run
+        # provisioned under the default triple must still match a submit that pinned
+        # nothing. Resumes instead carry the previous run's selection (below).
+        validated_data = _with_ai_run_defaults(
+            validated_data,
+            team_id=task.team_id,
+            acting_user_id=user_id if user_id is not None else task.created_by_id,
+            internal=task.internal,
+        )
         warm_run = _idling_warm_run_for_task(task)
         if warm_run is not None and (branch or None) == (warm_run.branch or None):
             warm_state = warm_run.state or {}
@@ -5099,7 +5168,7 @@ def run_task(
             )
 
     logger.info("Creating task run for task %s with mode=%s, branch=%s", task.id, mode, branch)
-    task_run = task.create_run(mode=mode, branch=branch, extra_state=extra_state)
+    task_run = task.create_run(mode=mode, branch=branch, extra_state=extra_state, acting_user_id=user_id)
     if is_pi_task and resume_from_run_id:
         task_run.active_task_session = previous_run.active_task_session
         task_run.save(update_fields=["active_task_session", "updated_at"])
