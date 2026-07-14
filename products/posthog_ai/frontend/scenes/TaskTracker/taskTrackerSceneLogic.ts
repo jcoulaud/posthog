@@ -12,6 +12,7 @@ import { tasksCreate, tasksRunCreate } from 'products/tasks/frontend/generated/a
 import {
     ClaudeRuntimeAdapterEnumApi,
     OriginProductEnumApi,
+    type ClaudeTaskRunCreateSchemaApi,
     ReasoningEffortEnumApi,
     type TaskWriteApi,
     TaskExecutionModeEnumApi,
@@ -25,12 +26,13 @@ import { composerSeedLogic } from '../../logics/composerSeedLogic'
 import type { ComposerSeed } from '../../logics/composerSeedLogic'
 import { runnerPanelLogic } from '../../logics/runnerPanelLogic'
 import type { ActiveCreation } from '../../logics/runnerPanelLogic'
+import { taskRunDefaultsLogic } from '../../logics/taskRunDefaultsLogic'
 import { tasksLogic } from '../../logics/tasksLogic'
 import { toolStreamEventsLogic } from '../../logics/toolStreamEventsLogic'
 import type { AttachedContextItem } from '../../types/contextTypes'
 import type { RepositoryConfig, Task } from '../../types/taskTypes'
 import type { TaskListParams } from '../../types/taskTypes'
-import { DEFAULT_COMPOSER_EFFORT, DEFAULT_COMPOSER_MODEL, resolveEffortForModel } from '../../utils/composerModels'
+import { DEFAULT_COMPOSER_MODEL, resolveEffortForModel } from '../../utils/composerModels'
 import { DEFAULT_COMPOSER_MODE, type PermissionMode } from '../../utils/composerModes'
 import { wrapWithPosthogContext } from '../../utils/posthogContextBlock'
 
@@ -39,8 +41,11 @@ export type { ActiveCreation } from '../../logics/runnerPanelLogic'
 export interface TaskCreateForm {
     description: string
     repositoryConfig: RepositoryConfig
-    model: string
-    reasoningEffort: ReasoningEffortEnumApi
+    /** null = no explicit pick; the run launches with the server-resolved default (user preference
+     * over project default, else the built-in composer default). An explicit pick applies to this
+     * run only — the form resets to null after submit. */
+    model: string | null
+    reasoningEffort: ReasoningEffortEnumApi | null
     permissionMode: PermissionMode
 }
 
@@ -64,8 +69,8 @@ const EMPTY_TASK_FORM: TaskCreateForm = {
         integrationId: undefined,
         repository: undefined,
     },
-    model: DEFAULT_COMPOSER_MODEL,
-    reasoningEffort: DEFAULT_COMPOSER_EFFORT,
+    model: null,
+    reasoningEffort: null,
     permissionMode: DEFAULT_COMPOSER_MODE,
 }
 
@@ -78,6 +83,8 @@ export interface taskTrackerSceneLogicValues {
     currentProjectId: number | null // projectLogic
     activeCreation: ActiveCreation | null // runnerPanelLogic
     historyExpanded: boolean // runnerPanelLogic
+    claudeDefaultEffort: string | null // taskRunDefaultsLogic
+    claudeDefaultModel: string | null // taskRunDefaultsLogic
     repositories: string[] // tasksLogic
     taskListParams: TaskListParams // tasksLogic
     tasks: Task[] // tasksLogic
@@ -313,6 +320,8 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
             ['currentProjectId'],
             composerSeedLogic(props),
             ['seed'],
+            taskRunDefaultsLogic,
+            ['claudeDefaultModel', 'claudeDefaultEffort'],
         ],
         actions: [
             runnerPanelLogic(props),
@@ -504,15 +513,35 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
                 const projectId = String(values.currentProjectId)
                 const newTask = await tasksCreate(projectId, taskData)
 
+                // The runtime selection for this run. Touching either picker pins the displayed
+                // selection explicitly, for this run only (the form resets to null after submit).
+                // Untouched with a Claude server default available, the selection is omitted entirely so
+                // the backend applies the user/project default (this also lets warm runs match). With no
+                // default either, the built-in composer model is pinned, preserving pre-defaults behavior.
+                let runtimeSelection: ClaudeTaskRunCreateSchemaApi | Record<string, never>
+                if (model || reasoningEffort) {
+                    const pinnedModel = model ?? values.claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL
+                    runtimeSelection = {
+                        runtime_adapter: ClaudeRuntimeAdapterEnumApi.Claude,
+                        model: pinnedModel,
+                        reasoning_effort: resolveEffortForModel(reasoningEffort, pinnedModel),
+                    }
+                } else if (values.claudeDefaultModel) {
+                    runtimeSelection = {}
+                } else {
+                    runtimeSelection = {
+                        runtime_adapter: ClaudeRuntimeAdapterEnumApi.Claude,
+                        model: DEFAULT_COMPOSER_MODEL,
+                        reasoning_effort: resolveEffortForModel(null, DEFAULT_COMPOSER_MODEL),
+                    }
+                }
+
                 // Auto-run the task after creation; the detail scene shows the latest run by default. The
-                // run checks out the chosen branch (server falls back to the repo's default branch if unset)
-                // and launches with the picked model / reasoning effort (clamped to one the model supports).
+                // run checks out the chosen branch (server falls back to the repo's default branch if unset).
                 const runResponse = await tasksRunCreate(projectId, newTask.id, {
                     branch: repositoryConfig.branch ?? null,
-                    runtime_adapter: ClaudeRuntimeAdapterEnumApi.Claude,
-                    model,
-                    reasoning_effort: resolveEffortForModel(reasoningEffort, model),
                     initial_permission_mode: permissionMode,
+                    ...runtimeSelection,
                     // Interactive keeps the sandbox agent-server's event stream open across turns, so
                     // follow-up messages stream their reply over the same SSE (background runs seal the
                     // stream after the first turn). Interactive runs boot with the agent-server pulling

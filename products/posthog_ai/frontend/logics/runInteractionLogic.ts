@@ -29,6 +29,7 @@ import { contextItemLine, wrapWithPosthogContext } from '../utils/posthogContext
 import { attachedContextLogic } from './attachedContextLogic'
 import { isTerminalRunStatus, runStreamLogic } from './runStreamLogic'
 import type { RunStatus } from './runStreamLogic'
+import { taskRunDefaultsLogic } from './taskRunDefaultsLogic'
 import { toolStreamEventsLogic } from './toolStreamEventsLogic'
 
 export interface RunInteractionLogicProps {
@@ -80,6 +81,8 @@ export interface runInteractionLogicValues {
     isThinking: boolean // runStreamLogic
     pendingPermissionRequest: PermissionRequestRecord | null // runStreamLogic
     respondingToPermission: boolean // runStreamLogic
+    claudeDefaultEffort: string | null // taskRunDefaultsLogic
+    claudeDefaultModel: string | null // taskRunDefaultsLogic
     canSend: boolean
     composerForm: {
         draft: string
@@ -297,8 +300,13 @@ export interface runInteractionLogicMeta {
     key: string
     __keaTypeGenInternalSelectorTypes: {
         isTerminal: (currentRunStatus: RunStatus | null) => boolean
-        selectedModel: (modelOverride: string | null, arg: any) => string
-        selectedEffort: (effortOverride: string | null, arg: any, selectedModel: string) => ReasoningEffortEnumApi
+        selectedModel: (modelOverride: string | null, arg: any, claudeDefaultModel: any) => string
+        selectedEffort: (
+            effortOverride: string | null,
+            arg: any,
+            claudeDefaultEffort: any,
+            selectedModel: string
+        ) => ReasoningEffortEnumApi
         selectedMode: (modeOverride: PermissionMode | null, currentMode: string | null, arg: any) => PermissionMode
         isBusy: (isThinking: boolean) => boolean
         canSend: (sending: boolean, isTerminal: boolean, currentProjectId: number | null) => boolean
@@ -347,6 +355,8 @@ export const runInteractionLogic = kea<runInteractionLogicType>([
             ['contextItems', 'sentContextKeysByTask', 'seenContextLinesByTask'],
             aiConsentLogic,
             ['dataProcessingAccepted'],
+            taskRunDefaultsLogic,
+            ['claudeDefaultModel', 'claudeDefaultEffort'],
         ],
         actions: [
             runStreamLogic({ streamKey: props.streamKey ?? props.runId }),
@@ -529,15 +539,17 @@ export const runInteractionLogic = kea<runInteractionLogicType>([
             (status: null | import('./runStreamLogic').RunStatus): boolean => isTerminalRunStatus(status),
         ],
         // The model/effort to display in the picker and launch the next run with: the optimistic client-side
-        // override, else the run's stored value, else the default. Effort is clamped to one the model supports.
+        // override, else the run's stored value, else the server-resolved default (user preference over
+        // project default), else the built-in default. Effort is clamped to one the model supports.
         selectedModel: [
-            (s) => [s.modelOverride, (_, p) => p.currentModel],
-            (override: string | null, current): string => override ?? current ?? DEFAULT_COMPOSER_MODEL,
+            (s) => [s.modelOverride, (_, p) => p.currentModel, s.claudeDefaultModel],
+            (override: string | null, current, serverDefault: string | null): string =>
+                override ?? current ?? serverDefault ?? DEFAULT_COMPOSER_MODEL,
         ],
         selectedEffort: [
-            (s) => [s.effortOverride, (_, p) => p.currentEffort, s.selectedModel],
-            (override: string | null, current, model: string): ReasoningEffortEnumApi =>
-                resolveEffortForModel(override ?? current ?? DEFAULT_COMPOSER_EFFORT, model),
+            (s) => [s.effortOverride, (_, p) => p.currentEffort, s.claudeDefaultEffort, s.selectedModel],
+            (override: string | null, current, serverDefault: string | null, model: string): ReasoningEffortEnumApi =>
+                resolveEffortForModel(override ?? current ?? serverDefault ?? DEFAULT_COMPOSER_EFFORT, model),
         ],
         // The permission mode to display and launch with: the client-side override, else the session's live
         // mode (from the stream's `current_mode_update` frames), else the run's stored launch mode, else the
@@ -641,9 +653,13 @@ export const runInteractionLogic = kea<runInteractionLogicType>([
                     // `set_config_option` command before the message rather than ride inside `user_message`. A
                     // failure here aborts the send (the catch restores the content); `setSent*` runs only after a
                     // successful sync so the next send retries an unsent change.
-                    const activeModel = values.sentModel ?? props.currentModel ?? DEFAULT_COMPOSER_MODEL
+                    const activeModel =
+                        values.sentModel ?? props.currentModel ?? values.claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL
                     const activeEffort = resolveEffortForModel(
-                        values.sentEffort ?? props.currentEffort ?? DEFAULT_COMPOSER_EFFORT,
+                        values.sentEffort ??
+                            props.currentEffort ??
+                            values.claudeDefaultEffort ??
+                            DEFAULT_COMPOSER_EFFORT,
                         activeModel
                     )
                     if (values.selectedModel !== activeModel) {

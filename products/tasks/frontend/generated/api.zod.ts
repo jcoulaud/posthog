@@ -3033,15 +3033,15 @@ export const TasksConfigCreateBody = /* @__PURE__ */ zod
         reasoning_effort: zod
             .union([
                 zod
-                    .enum(['low', 'medium', 'high', 'xhigh', 'max'])
+                    .enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
                     .describe(
-                        '\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max'
+                        '\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max\n\* `ultracode` - ultracode'
                     ),
                 zod.null(),
             ])
             .optional()
             .describe(
-                'Default reasoning effort for models that expose an effort control.\n\n\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max'
+                'Default reasoning effort for models that expose an effort control.\n\n\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max\n\* `ultracode` - ultracode'
             ),
     })
     .describe(
@@ -3066,15 +3066,15 @@ export const TasksMyConfigCreateBody = /* @__PURE__ */ zod
         reasoning_effort: zod
             .union([
                 zod
-                    .enum(['low', 'medium', 'high', 'xhigh', 'max'])
+                    .enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
                     .describe(
-                        '\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max'
+                        '\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max\n\* `ultracode` - ultracode'
                     ),
                 zod.null(),
             ])
             .optional()
             .describe(
-                'Default reasoning effort for models that expose an effort control.\n\n\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max'
+                'Default reasoning effort for models that expose an effort control.\n\n\* `low` - low\n\* `medium` - medium\n\* `high` - high\n\* `xhigh` - xhigh\n\* `max` - max\n\* `ultracode` - ultracode'
             ),
     })
     .describe(

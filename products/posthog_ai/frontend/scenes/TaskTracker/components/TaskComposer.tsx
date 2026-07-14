@@ -11,7 +11,11 @@ import {
     Suggestions,
     Welcome,
 } from 'products/posthog_ai/frontend/api/primitives'
-import { resolveEffortForModel } from 'products/posthog_ai/frontend/utils/composerModels'
+import {
+    DEFAULT_COMPOSER_EFFORT,
+    DEFAULT_COMPOSER_MODEL,
+    resolveEffortForModel,
+} from 'products/posthog_ai/frontend/utils/composerModels'
 import { cycleMode } from 'products/posthog_ai/frontend/utils/composerModes'
 
 import { AttachedContextBar } from '../../../components/composer/AttachedContextBar'
@@ -19,6 +23,7 @@ import { ComposerModelEffortPickers } from '../../../components/composer/Compose
 import { ComposerModePicker } from '../../../components/composer/ComposerModePicker'
 import { ComposerModeShortcut } from '../../../components/composer/ComposerModeShortcut'
 import { useDebouncedDraft } from '../../../components/composer/useDebouncedDraft'
+import { taskRunDefaultsLogic } from '../../../logics/taskRunDefaultsLogic'
 import { taskTrackerSceneLogic } from '../taskTrackerSceneLogic'
 import { RepositorySelector } from './RepositorySelector'
 
@@ -27,6 +32,15 @@ export function TaskComposer(): JSX.Element {
         useActions(taskTrackerSceneLogic)
     const { newTaskData, isSubmittingTask, activeSuggestionGroup, headline, consentBlocked } =
         useValues(taskTrackerSceneLogic)
+    const { claudeDefaultModel, claudeDefaultEffort } = useValues(taskRunDefaultsLogic)
+
+    // What the pickers display when nothing is explicitly picked for this run: the server-resolved
+    // default (user preference over project default), else the built-in composer defaults.
+    const displayModel = newTaskData.model ?? claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL
+    const displayEffort = resolveEffortForModel(
+        newTaskData.reasoningEffort ?? claudeDefaultEffort ?? DEFAULT_COMPOSER_EFFORT,
+        displayModel
+    )
 
     // Buffer the description locally and debounce the write to kea so each keystroke is a cheap, isolated
     // re-render instead of a store dispatch. `Composer.Root` already blocks send on an empty `draft.value`
@@ -83,8 +97,9 @@ export function TaskComposer(): JSX.Element {
                                         onModeChange={(permissionMode) => setNewTaskData({ permissionMode })}
                                     />
                                     <ComposerModelEffortPickers
-                                        selectedModel={newTaskData.model}
-                                        selectedEffort={newTaskData.reasoningEffort}
+                                        selectedModel={displayModel}
+                                        selectedEffort={displayEffort}
+                                        isDefaultSelection={newTaskData.model === null}
                                         onModelChange={(model) =>
                                             setNewTaskData({
                                                 model,

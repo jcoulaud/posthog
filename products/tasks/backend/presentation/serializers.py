@@ -12,8 +12,7 @@ from django.utils import timezone as django_timezone
 import posthoganalytics
 from croniter import croniter
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema_field
-from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema_serializer
+from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema_field, extend_schema_serializer
 from rest_framework import serializers
 from rest_framework_dataclasses.serializers import DataclassSerializer
 
@@ -3345,7 +3344,9 @@ class TasksResolvedAIRunDefaultsSerializer(serializers.Serializer):
     reasoning_effort = serializers.CharField(
         allow_null=True, help_text="Effective default reasoning effort, or null when unset or unsupported."
     )
-    source = serializers.ChoiceField(
+    # `Field.source` exists on the base class, but the serializer metaclass pops declared fields off the
+    # class body before it ever binds, so there is no shadowing at runtime — only mypy sees a clash.
+    source = serializers.ChoiceField(  # type: ignore[assignment]
         choices=["user", "team", "none"],
         help_text="Preference level that supplied the default: the caller's own per-project preference ('user'), the project default ('team'), or 'none'.",
     )

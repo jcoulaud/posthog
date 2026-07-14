@@ -1,4 +1,5 @@
 from dataclasses import asdict
+from typing import cast
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -12,6 +13,7 @@ from rest_framework.response import Response
 
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.auth import OAuthAccessTokenAuthentication, PersonalAPIKeyAuthentication
+from posthog.models.user import User
 from posthog.permissions import APIScopePermission
 
 from products.tasks.backend.facade import ai_run_defaults
@@ -22,6 +24,11 @@ from products.tasks.backend.presentation.serializers import (
 )
 
 _AUTH_CLASSES = [SessionAuthentication, PersonalAPIKeyAuthentication, OAuthAccessTokenAuthentication]
+
+
+def _user_id(request: Request) -> int:
+    """The requesting user's id; `IsAuthenticated` guarantees a real user on these views."""
+    return cast(User, request.user).id
 
 
 def _validated_triple(request: Request) -> dict:
@@ -89,7 +96,7 @@ class TasksUserConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         return ["task:write"]
 
     def _response(self, request: Request, preferences: dict) -> Response:
-        resolved = ai_run_defaults.resolve_ai_run_defaults(self.team_id, request.user.id)
+        resolved = ai_run_defaults.resolve_ai_run_defaults(self.team_id, _user_id(request))
         return Response({"ai_run_preferences": preferences, "resolved_ai_run_defaults": asdict(resolved)})
 
     @extend_schema(
@@ -101,7 +108,7 @@ class TasksUserConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         ),
     )
     def list(self, request: Request, *args, **kwargs) -> Response:
-        return self._response(request, ai_run_defaults.get_user_ai_run_preferences(self.team_id, request.user.id))
+        return self._response(request, ai_run_defaults.get_user_ai_run_preferences(self.team_id, _user_id(request)))
 
     @extend_schema(
         request=TasksAIRunPreferencesSerializer,
@@ -114,7 +121,7 @@ class TasksUserConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
     def create(self, request: Request, *args, **kwargs) -> Response:
         triple = _validated_triple(request)
         try:
-            payload = ai_run_defaults.update_user_ai_run_preferences(self.team_id, request.user.id, **triple)
+            payload = ai_run_defaults.update_user_ai_run_preferences(self.team_id, _user_id(request), **triple)
         except DjangoValidationError as e:
             raise ValidationError(e.messages)
         return self._response(request, payload)
