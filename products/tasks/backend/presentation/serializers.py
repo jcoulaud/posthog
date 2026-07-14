@@ -13,6 +13,7 @@ import posthoganalytics
 from croniter import croniter
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema_field
+from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema_serializer
 from rest_framework import serializers
 from rest_framework_dataclasses.serializers import DataclassSerializer
 
@@ -3350,6 +3351,7 @@ class TasksResolvedAIRunDefaultsSerializer(serializers.Serializer):
     )
 
 
+@extend_schema_serializer(many=False)
 class TasksTeamConfigResponseSerializer(serializers.Serializer):
     """Team-level tasks configuration."""
 
@@ -3358,6 +3360,7 @@ class TasksTeamConfigResponseSerializer(serializers.Serializer):
     )
 
 
+@extend_schema_serializer(many=False)
 class TasksUserConfigResponseSerializer(serializers.Serializer):
     """The requesting user's per-project tasks configuration."""
 

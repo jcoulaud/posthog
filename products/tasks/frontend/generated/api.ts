@@ -47,8 +47,6 @@ import type {
     PatchedChannelUpdateApi,
     PatchedLoopWriteApi,
     PatchedSandboxCustomImageUpdateApi,
-    PaginatedTasksTeamConfigResponseListApi,
-    PaginatedTasksUserConfigResponseListApi,
     PatchedSandboxEnvironmentWriteApi,
     PatchedTaskAutomationWriteApi,
     PatchedTaskRunSetOutputRequestApi,
@@ -2270,8 +2268,8 @@ export const tasksConfigList = async (
     projectId: string,
     params?: TasksConfigListParams,
     options?: RequestInit
-): Promise<PaginatedTasksTeamConfigResponseListApi> => {
-    return apiMutator<PaginatedTasksTeamConfigResponseListApi>(getTasksConfigListUrl(projectId, params), {
+): Promise<TasksTeamConfigResponseApi> => {
+    return apiMutator<TasksTeamConfigResponseApi>(getTasksConfigListUrl(projectId, params), {
         ...options,
         method: 'GET',
     })
@@ -2320,8 +2318,8 @@ export const tasksMyConfigList = async (
     projectId: string,
     params?: TasksMyConfigListParams,
     options?: RequestInit
-): Promise<PaginatedTasksUserConfigResponseListApi> => {
-    return apiMutator<PaginatedTasksUserConfigResponseListApi>(getTasksMyConfigListUrl(projectId, params), {
+): Promise<TasksUserConfigResponseApi> => {
+    return apiMutator<TasksUserConfigResponseApi>(getTasksMyConfigListUrl(projectId, params), {
         ...options,
         method: 'GET',
     })
