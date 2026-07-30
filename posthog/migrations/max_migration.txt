@@ -1,1 +1,1 @@
-1265_add_ebay_integration_kind
+1277_add_ebay_integration_kind
