@@ -543,6 +543,7 @@ export interface integrationsLogicActions {
             | 'tiktok-ads'
             | 'twilio'
             | 'vercel'
+            | 'youtube-analytics'
             | 'youtube-analytics',
         payload?: {
             kind: IntegrationKind
