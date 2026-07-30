@@ -27618,7 +27618,8 @@
                 "postgresql",
                 "aws-s3",
                 "s3-compatible",
-                "snowflake"
+                "snowflake",
+                "ebay"
             ],
             "type": "string"
         },
