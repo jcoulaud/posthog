@@ -5542,6 +5542,7 @@ export namespace Schemas {
       Github: 'github',
       Gitlab: 'gitlab',
       MetaAds: 'meta-ads',
+      FacebookPages: 'facebook-pages',
       Clickup: 'clickup',
       RedditAds: 'reddit-ads',
       Databricks: 'databricks',
