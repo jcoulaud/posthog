@@ -5523,6 +5523,9 @@ export namespace Schemas {
 
     export const IntegrationKind = {
       Slack: 'slack',
+      AmazonSellingPartnerNa: 'amazon-selling-partner-na',
+      AmazonSellingPartnerEu: 'amazon-selling-partner-eu',
+      AmazonSellingPartnerFe: 'amazon-selling-partner-fe',
       Salesforce: 'salesforce',
       Hubspot: 'hubspot',
       GooglePubsub: 'google-pubsub',
