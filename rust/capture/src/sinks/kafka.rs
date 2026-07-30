@@ -740,9 +740,7 @@ impl<P: KafkaProducer + 'static> Event for KafkaSinkBase<P> {
             histogram!("capture_kafka_batch_prep_duration_seconds")
                 .record(prep_start.elapsed().as_secs_f64());
 
-            for record in &prepared {
-                self.validate_record_size(record)?;
-            }
+            prepared.retain(|record| self.validate_record_size(record).is_ok());
 
             let enqueue_start = Instant::now();
             let mut ack_set = JoinSet::new();
@@ -822,9 +820,7 @@ impl<P: KafkaProducer + 'static> Event for KafkaSinkBase<P> {
         histogram!("capture_kafka_batch_prep_duration_seconds")
             .record(prep_start.elapsed().as_secs_f64());
 
-        for (_, record) in &prepared {
-            self.validate_record_size(record)?;
-        }
+        prepared.retain(|(_, record)| self.validate_record_size(record).is_ok());
 
         // Phase 2: serial enqueue in original event order. This is the ordering
         // bottleneck we deliberately keep: librdkafka preserves per-partition
@@ -2779,7 +2775,7 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn send_batch_oversized_record_aborts_before_enqueue() {
+        async fn send_batch_oversized_record_drops_only_that_record() {
             let producer = MockKafkaProducer::new();
             let mut events = build_batch(10);
             events[9].event.data = "x".repeat(10_000);
@@ -2789,10 +2785,15 @@ mod tests {
                 5_000,
             );
 
-            let result = sink.send_batch(events).await;
+            sink.send_batch(events)
+                .await
+                .expect("valid records should be sent");
 
-            assert!(matches!(result, Err(CaptureError::EventTooBig(_))));
-            assert!(producer.get_records().is_empty());
+            let records = producer.get_records();
+            assert_eq!(records.len(), 9);
+            assert!(records
+                .iter()
+                .all(|record| record.key.as_deref() != Some("user_9")));
         }
 
         // ==================== send_batch fast-path + mid-batch failure tests ====================
