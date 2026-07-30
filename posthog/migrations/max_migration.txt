@@ -1,1 +1,1 @@
-1265_add_amazon_selling_partner_integration_kinds
+1277_add_amazon_selling_partner_integration_kinds
