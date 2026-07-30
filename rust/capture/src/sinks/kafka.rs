@@ -19,7 +19,6 @@
 //! + topics) rather than deep copies of limiter state.
 use crate::api::CaptureError;
 use crate::config::{EnvelopeCompression, KafkaConfig};
-use crate::prometheus::report_dropped_events;
 use crate::sinks::producer::{KafkaProducer, ProduceRecord};
 use crate::sinks::Event;
 use crate::v0_request::{DataType, OverflowReason, ProcessedEvent};
@@ -225,7 +224,6 @@ pub struct KafkaSinkBase<P: KafkaProducer> {
     producer: Arc<P>,
     topics: Arc<KafkaTopicConfig>,
     replay_envelope_compression: EnvelopeCompression,
-    message_max_bytes: usize,
 }
 
 impl<P: KafkaProducer> Clone for KafkaSinkBase<P> {
@@ -234,7 +232,6 @@ impl<P: KafkaProducer> Clone for KafkaSinkBase<P> {
             producer: Arc::clone(&self.producer),
             topics: Arc::clone(&self.topics),
             replay_envelope_compression: self.replay_envelope_compression,
-            message_max_bytes: self.message_max_bytes,
         }
     }
 }
@@ -418,7 +415,6 @@ impl KafkaSink {
             producer: Arc::new(rd_producer),
             topics,
             replay_envelope_compression: config.kafka_replay_envelope_compression,
-            message_max_bytes: config.kafka_producer_message_max_bytes as usize,
         })
     }
 }
@@ -432,21 +428,6 @@ impl<P: KafkaProducer> KafkaSinkBase<P> {
             producer: Arc::new(producer),
             topics: Arc::new(topics),
             replay_envelope_compression: EnvelopeCompression::None,
-            message_max_bytes: usize::MAX,
-        }
-    }
-
-    #[cfg(test)]
-    fn with_producer_and_message_max_bytes(
-        producer: P,
-        topics: KafkaTopicConfig,
-        message_max_bytes: usize,
-    ) -> Self {
-        Self {
-            producer: Arc::new(producer),
-            topics: Arc::new(topics),
-            replay_envelope_compression: EnvelopeCompression::None,
-            message_max_bytes,
         }
     }
 
@@ -460,19 +441,7 @@ impl<P: KafkaProducer> KafkaSinkBase<P> {
             producer: Arc::new(producer),
             topics: Arc::new(topics),
             replay_envelope_compression,
-            message_max_bytes: usize::MAX,
         }
-    }
-
-    fn validate_record_size(&self, record: &ProduceRecord) -> Result<(), CaptureError> {
-        if record.max_wire_size() <= self.message_max_bytes {
-            return Ok(());
-        }
-
-        report_dropped_events("kafka_message_size", 1);
-        Err(CaptureError::EventTooBig(
-            "Event exceeds Kafka producer message.max.bytes".to_string(),
-        ))
     }
 
     /// CPU-bound prep work: serialize payload + build headers + pick topic/key.
@@ -740,8 +709,6 @@ impl<P: KafkaProducer + 'static> Event for KafkaSinkBase<P> {
             histogram!("capture_kafka_batch_prep_duration_seconds")
                 .record(prep_start.elapsed().as_secs_f64());
 
-            prepared.retain(|record| self.validate_record_size(record).is_ok());
-
             let enqueue_start = Instant::now();
             let mut ack_set = JoinSet::new();
             for record in prepared {
@@ -819,8 +786,6 @@ impl<P: KafkaProducer + 'static> Event for KafkaSinkBase<P> {
         debug_assert_eq!(prepared.len(), batch_size);
         histogram!("capture_kafka_batch_prep_duration_seconds")
             .record(prep_start.elapsed().as_secs_f64());
-
-        prepared.retain(|(_, record)| self.validate_record_size(record).is_ok());
 
         // Phase 2: serial enqueue in original event order. This is the ordering
         // bottleneck we deliberately keep: librdkafka preserves per-partition
@@ -2772,28 +2737,6 @@ mod tests {
                 "no records should reach the producer when prep phase fails; got {} records",
                 records.len()
             );
-        }
-
-        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn send_batch_oversized_record_drops_only_that_record() {
-            let producer = MockKafkaProducer::new();
-            let mut events = build_batch(10);
-            events[9].event.data = "x".repeat(10_000);
-            let sink = KafkaSinkBase::with_producer_and_message_max_bytes(
-                producer.clone(),
-                test_topics(),
-                5_000,
-            );
-
-            sink.send_batch(events)
-                .await
-                .expect("valid records should be sent");
-
-            let records = producer.get_records();
-            assert_eq!(records.len(), 9);
-            assert!(records
-                .iter()
-                .all(|record| record.key.as_deref() != Some("user_9")));
         }
 
         // ==================== send_batch fast-path + mid-batch failure tests ====================

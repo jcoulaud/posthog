@@ -32,6 +32,7 @@ pub const OTEL_BODY_SIZE: usize = 4 * 1024 * 1024; // 4MB
 /// if this is exceeded, so callers must batch sensibly.
 const MAX_AI_EVENTS_PER_REQUEST: usize = 100;
 const MAX_EXPANDED_AI_EVENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_EXPANDED_AI_EVENT_BYTES_PER_EVENT: usize = 900_000;
 
 /// Maximum raw spans accepted before filtering. Set well above
 /// MAX_AI_EVENTS_PER_REQUEST
@@ -42,6 +43,7 @@ const MAX_RAW_OTEL_SPANS_PER_REQUEST: usize = 1000;
 // tiny repeated protobuf messages can expand into much larger decoded vectors.
 const MAX_RAW_OTEL_LOG_RECORDS_PER_REQUEST: usize = 1000;
 const MAX_RAW_OTEL_LOG_NODES_PER_REQUEST: usize = 3000;
+const MAX_RAW_OTEL_LOG_NESTING_DEPTH: usize = 64;
 
 fn count_spans(request: &ExportTraceServiceRequest) -> usize {
     request
