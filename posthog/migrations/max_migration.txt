@@ -1,1 +1,1 @@
-1265_add_facebook_pages_integration_kind
+1277_add_facebook_pages_integration_kind
