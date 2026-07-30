@@ -5545,7 +5545,6 @@ export namespace Schemas {
       Clickup: 'clickup',
       RedditAds: 'reddit-ads',
       Databricks: 'databricks',
-      Ebay: 'ebay',
       TiktokAds: 'tiktok-ads',
       BingAds: 'bing-ads',
       Vercel: 'vercel',
