@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.typings import SortMode
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import incremental_field
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SortMode
 from products.warehouse_sources.backend.types import IncrementalField
 
 # PostHog's Meta app authorizes through Facebook Login, so the Instagram Platform surface is
