@@ -177,6 +177,7 @@ export interface RoleLookupResponseApi {
  * * `linkedin-ads` - Linkedin Ads
  * * `linkedin-pages` - Linkedin Pages
  * * `meta-ads` - Meta Ads
+ * * `pardot` - Pardot
  * * `pinterest-ads` - Pinterest Ads
  * * `postgresql` - Postgresql
  * * `reddit-ads` - Reddit Ads
@@ -223,6 +224,7 @@ export const IntegrationKindEnumApi = {
     LinkedinAds: 'linkedin-ads',
     LinkedinPages: 'linkedin-pages',
     MetaAds: 'meta-ads',
+    Pardot: 'pardot',
     PinterestAds: 'pinterest-ads',
     Postgresql: 'postgresql',
     RedditAds: 'reddit-ads',
@@ -460,6 +462,7 @@ export interface IntegrationAccessRequestApi {
      * * `linkedin-ads` - Linkedin Ads
      * * `linkedin-pages` - Linkedin Pages
      * * `meta-ads` - Meta Ads
+     * * `pardot` - Pardot
      * * `pinterest-ads` - Pinterest Ads
      * * `postgresql` - Postgresql
      * * `reddit-ads` - Reddit Ads
@@ -551,6 +554,7 @@ export type IntegrationsListParams = {
      * * `linkedin-ads` - Linkedin Ads
      * * `linkedin-pages` - Linkedin Pages
      * * `meta-ads` - Meta Ads
+     * * `pardot` - Pardot
      * * `pinterest-ads` - Pinterest Ads
      * * `postgresql` - Postgresql
      * * `reddit-ads` - Reddit Ads
@@ -608,6 +612,7 @@ export const IntegrationsListKind = {
     LinkedinAds: 'linkedin-ads',
     LinkedinPages: 'linkedin-pages',
     MetaAds: 'meta-ads',
+    Pardot: 'pardot',
     PinterestAds: 'pinterest-ads',
     Postgresql: 'postgresql',
     RedditAds: 'reddit-ads',

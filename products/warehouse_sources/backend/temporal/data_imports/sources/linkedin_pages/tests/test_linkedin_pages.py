@@ -7,7 +7,7 @@ from unittest import mock
 
 from requests import Response
 
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.batcher import Batcher
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.batcher import Batcher
 from products.warehouse_sources.backend.temporal.data_imports.sources.linkedin_pages.linkedin_pages import (
     INITIAL_LOOKBACK_DAYS,
     PAGE_SIZE,
