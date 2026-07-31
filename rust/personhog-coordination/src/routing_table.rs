@@ -494,7 +494,7 @@ impl RoutingTable {
             let token = cancel.child_token();
             tasks.spawn(async move {
                 util::run_lease_keepalive(
-                    store, lease_id, interval, lease_ttl, granted_at, "router", token,
+                    store, lease_id, interval, lease_ttl, granted_at, "router", None, token,
                 )
                 .await
             });

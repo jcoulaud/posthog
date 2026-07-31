@@ -12,6 +12,7 @@ use kube::Client;
 use lifecycle::{ComponentOptions, Manager};
 use personhog_common::async_gzip::{AsyncGzipConfig, AsyncGzipLayer};
 use personhog_common::grpc::{tracked_tcp_incoming, GrpcLoadShedLayer, GrpcMetricsLayer};
+use personhog_coordination::authority::AuthorityClock;
 use personhog_coordination::pod::{PodConfig, PodHandle};
 use personhog_coordination::store::PersonhogStore;
 use personhog_proto::personhog::leader::v1::person_hog_leader_server::PersonHogLeaderServer;
@@ -244,6 +245,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // One clock for the process: the coordination session claims and
+    // surrenders it, the data plane reads it per request.
+    let authority = Arc::new(AuthorityClock::unclaimed());
+    let gated_authority = if config.lease_gated_authority {
+        tracing::info!(
+            "lease-gated authority enabled: reads and fence acquisition require a \
+                        confirmed lease renewal within the keepalive margin"
+        );
+        Some(Arc::clone(&authority))
+    } else {
+        None
+    };
+
     let service = PersonHogLeaderService::new(
         Arc::clone(&cache),
         kafka_producer.clone(),
@@ -260,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         warnings.clone(),
         fenced.clone(),
+        gated_authority.clone(),
     );
 
     let warm_pools = Arc::new(WarmClientPools::new(
@@ -292,6 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Arc::clone(&warm_pools),
         fenced,
+        gated_authority.clone(),
     );
     let advertise_address =
         personhog_leader::config::derive_advertise_address(&config.grpc_address, &config.pod_ip)
@@ -366,7 +382,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let pod = PodHandle::new(store, pod_config, Arc::new(handler), k8s_awareness);
+    let pod = PodHandle::new(
+        store,
+        pod_config,
+        Arc::new(handler),
+        k8s_awareness,
+        Arc::clone(&authority),
+    );
 
     tokio::spawn(async move {
         let _guard = coordination_handle.process_scope();

@@ -97,6 +97,11 @@ pub struct HandoffModel {
     /// Fence-vs-read ordering of the decomposed warm; ignored under
     /// `Variant::Current`, whose warm is a single atomic step.
     pub warm_order: WarmOrder,
+    /// Whether a pod consults its lease before serving a strong read
+    /// (production: the leader's `LEASE_GATED_AUTHORITY`). Without it a
+    /// pod that has lost its registration keeps answering out of a cache
+    /// the new owner is already changing.
+    pub lease_gated_reads: bool,
     /// Total client writes the checker may inject.
     pub writes: u8,
     /// Total strong reads the checker may inject.
@@ -318,6 +323,14 @@ impl HandoffModel {
     fn serve_read(&self, state: &mut SystemState, x: PodId, partition: Partition) -> bool {
         let pod = &state.pods[&x];
         if !pod.running {
+            return false;
+        }
+        // The read gate: a pod whose registration is gone refuses rather
+        // than serving from a cache it can no longer vouch for. The
+        // production check is a margin on the last confirmed renewal,
+        // which lapses strictly before the coordinator can reassign — so
+        // an unregistered pod is exactly the set this refuses.
+        if self.lease_gated_reads && !pod.registered {
             return false;
         }
         let Some(warm) = pod.warmed.get(&partition) else {

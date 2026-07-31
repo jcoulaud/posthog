@@ -280,6 +280,13 @@ pub struct Config {
     #[envconfig(default = "")]
     pub k8s_namespace: String,
 
+    /// Refuse strong reads and fence acquisition once this pod's lease
+    /// may have expired, instead of serving until the keepalive notices.
+    /// Trades availability during an etcd outage for never answering as
+    /// an owner the protocol may already have replaced.
+    #[envconfig(default = "false")]
+    pub lease_gated_authority: bool,
+
     #[envconfig(default = "30")]
     pub lease_ttl: i64,
 

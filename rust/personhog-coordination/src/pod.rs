@@ -18,6 +18,7 @@ use assignment_coordination::store::parse_watch_value;
 use k8s_awareness::types::{ControllerKind, ControllerRef};
 use k8s_awareness::{DepartureReason, K8sAwareness};
 
+use crate::authority::AuthorityClock;
 use crate::error::{Error, Result};
 use crate::store::{self, PersonhogStore};
 use crate::types::{
@@ -248,18 +249,25 @@ pub struct PodHandle {
     /// not reflect lost ownership, so the run supervisor must not retry
     /// in place — only a process restart clears this.
     fence_poisoned: AtomicBool,
+    /// This pod's claim to serve, shared with the data plane and reset
+    /// at each lease grant. Reads as invalid until the first grant.
+    authority: Arc<AuthorityClock>,
     /// Optional K8s awareness for departure classification during shutdown.
     k8s_awareness: Option<Arc<K8sAwareness>>,
 }
 
 impl PodHandle {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<PersonhogStore>,
         config: PodConfig,
         handler: Arc<dyn HandoffHandler>,
         k8s_awareness: Option<Arc<K8sAwareness>>,
+        // Shared with the data plane, which holds it from process start
+        // and consults it per request.
+        authority: Arc<AuthorityClock>,
     ) -> Self {
-        let renewal_margin = Duration::from_secs(config.lease_ttl.max(0) as u64).mul_f64(2.0 / 3.0);
+        let renewal_margin = AuthorityClock::renewal_margin(config.lease_ttl);
         assert!(
             config.heartbeat_interval < renewal_margin,
             "heartbeat_interval ({:?}) must be well under the keepalive renewal margin \
@@ -277,8 +285,15 @@ impl PodHandle {
             drain_notify: Notify::new(),
             warm_slots,
             fence_poisoned: AtomicBool::new(false),
+            authority,
             k8s_awareness,
         }
+    }
+
+    /// This pod's claim to serve, for the data plane to consult on the
+    /// request path. Invalid until the first lease is granted.
+    pub fn authority(&self) -> Arc<AuthorityClock> {
+        Arc::clone(&self.authority)
     }
 
     /// Run the pod's coordination, supervised at two levels so a
@@ -339,15 +354,29 @@ impl PodHandle {
             // session split exists to close. It keeps running through the
             // drain phase too, so the coordinator sees a Draining pod
             // rather than a crashed one.
+            // A new lease is a new claim: reset the shared clock rather
+            // than replacing it, so the data plane's handle carries the
+            // new session without re-plumbing.
+            self.authority
+                .begin_session(AuthorityClock::renewal_margin(self.config.lease_ttl));
+
             let heartbeat_cancel = CancellationToken::new();
             let mut heartbeat_handle = {
                 let store = Arc::clone(&self.store);
                 let interval = self.config.heartbeat_interval;
                 let lease_ttl = self.config.lease_ttl;
                 let token = heartbeat_cancel.child_token();
+                let authority = Arc::clone(&self.authority);
                 tokio::spawn(async move {
                     util::run_lease_keepalive(
-                        store, lease_id, interval, lease_ttl, granted_at, "pod", token,
+                        store,
+                        lease_id,
+                        interval,
+                        lease_ttl,
+                        granted_at,
+                        "pod",
+                        Some(authority),
+                        token,
                     )
                     .await
                 })
@@ -625,6 +654,13 @@ impl PodHandle {
     /// documented zombie residual; this closes only the part the local
     /// fence itself controls.
     async fn self_fence_locally(&self, drain_bound: Duration) -> Result<()> {
+        // Surrender first, before any await: the data plane must stop
+        // treating itself as the owner the instant we know we are not,
+        // rather than at the end of a drain that can take seconds. This
+        // is also what makes the surrender authoritative — a stale stamp
+        // merely expires, but lease loss is a fact that must not be
+        // undone by a renewal racing in behind us.
+        self.authority.surrender();
         let held: HashSet<u32> = {
             let warmed = self.warmed_partitions.lock().await;
             let fenced = self.fenced_partitions.lock().await;

@@ -49,6 +49,7 @@ fn main() {
         partitions: 1,
         variant,
         warm_order,
+        lease_gated_reads: false,
         writes: 2,
         reads: 1,
         crashes,

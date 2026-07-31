@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use personhog_coordination::authority::AuthorityClock;
 use std::collections::{HashMap, HashSet};
 use std::future::{pending, Future};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -176,6 +177,7 @@ pub fn start_pod_with_address(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });
@@ -258,6 +260,7 @@ pub fn start_pod_with_flaky_resume(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });
@@ -290,6 +293,7 @@ pub fn start_pod_blocking(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });
@@ -359,6 +363,7 @@ pub fn start_pod_slow(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });
@@ -746,6 +751,7 @@ pub fn start_pod_gated(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });

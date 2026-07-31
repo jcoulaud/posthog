@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub use assignment_coordination::util::{now_millis, now_seconds};
 
+use crate::authority::AuthorityClock;
 use crate::error::{Error, Result};
 use crate::store::PersonhogStore;
 
@@ -90,6 +91,7 @@ pub(crate) fn note_run_failure(
 /// local measurement is conservative, and every await in the loop is
 /// bounded by the time left so a hang can never defer the verdict past
 /// the moment the fence must begin.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_lease_keepalive(
     store: Arc<PersonhogStore>,
     lease_id: i64,
@@ -97,6 +99,10 @@ pub async fn run_lease_keepalive(
     lease_ttl: i64,
     granted_at: Instant,
     component: &'static str,
+    // Published on every confirmed renewal, so the data plane can judge
+    // its own authority without depending on this task being alive to
+    // tell it. `None` for components that serve nothing.
+    authority: Option<Arc<AuthorityClock>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let renewal_margin = Duration::from_secs(lease_ttl.max(0) as u64).mul_f64(2.0 / 3.0);
@@ -180,7 +186,12 @@ pub async fn run_lease_keepalive(
                 ))),
             };
             match outcome {
-                Ok(true) => last_renewed = Instant::now(),
+                Ok(true) => {
+                    last_renewed = Instant::now();
+                    if let Some(authority) = &authority {
+                        authority.confirm();
+                    }
+                }
                 // Authoritative: the lease is gone, no margin applies.
                 Ok(false) => return Err(Error::leadership_lost()),
                 Err(e) => {

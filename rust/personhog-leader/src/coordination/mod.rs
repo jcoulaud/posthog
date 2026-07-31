@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use metrics::counter;
+use personhog_coordination::authority::AuthorityClock;
 use personhog_coordination::error::{Error, Result};
 use personhog_coordination::pod::HandoffHandler;
 use tracing::info;
@@ -51,6 +53,13 @@ pub struct LeaderHandoffHandler {
     /// partition initializes its transactional producer (fencing every
     /// predecessor), and releasing it drops the producer.
     fenced: Option<Arc<FencedChangelogProducers>>,
+    /// Present when lease-gated authority is on. Acquiring a fence takes
+    /// the partition's epoch away from whoever holds it, so a pod whose
+    /// lease may have lapsed must not do it: the broker grants the epoch
+    /// to whoever initializes last, not to whoever the protocol says
+    /// owns the partition, so an unchecked acquire lets a zombie waking
+    /// inside its lease window fence the legitimate owner.
+    authority: Option<Arc<AuthorityClock>>,
 }
 
 impl LeaderHandoffHandler {
@@ -61,6 +70,7 @@ impl LeaderHandoffHandler {
         warming: WarmingConfig,
         pools: Arc<WarmClientPools>,
         fenced: Option<Arc<FencedChangelogProducers>>,
+        authority: Option<Arc<AuthorityClock>>,
     ) -> Self {
         Self {
             cache,
@@ -69,11 +79,37 @@ impl LeaderHandoffHandler {
             warming,
             pools,
             fenced,
+            authority,
         }
     }
 
     pub fn owns_partition(&self, partition: u32) -> bool {
         self.cache.has_partition(partition)
+    }
+
+    /// Refuse to take a partition's fence when this pod's own lease may
+    /// have lapsed.
+    ///
+    /// Acquisition is not a private act: `init_transactions` moves the
+    /// broker's epoch to this producer and invalidates the previous
+    /// holder, whoever that is. A pod that has stopped renewing has no
+    /// standing to do that, and doing it anyway is how a waking zombie
+    /// takes the partition away from the owner that legitimately holds
+    /// it. Failing here leaves the convergence to retry once the lease
+    /// is confirmed again, or to end with the session if it is not.
+    fn check_authority(&self, partition: u32) -> Result<()> {
+        let Some(authority) = &self.authority else {
+            return Ok(());
+        };
+        if authority.is_valid() {
+            return Ok(());
+        }
+        counter!("personhog_leader_authority_lapsed_acquires_total").increment(1);
+        Err(Error::invalid_state(format!(
+            "refusing to take the changelog fence for partition {partition}: no confirmed \
+             lease renewal in {:?}",
+            authority.since_confirmed()
+        )))
     }
 }
 
@@ -103,6 +139,7 @@ impl HandoffHandler for LeaderHandoffHandler {
 
     async fn warm_partition(&self, partition: u32) -> Result<()> {
         info!(partition, "warming partition cache from kafka");
+        self.check_authority(partition)?;
         // Broker-side fencing before the warm read, not after: acquiring
         // the fence bumps the producer epoch and aborts any in-flight
         // transaction from a predecessor, so every write a stale owner
@@ -148,6 +185,7 @@ impl HandoffHandler for LeaderHandoffHandler {
 
     async fn resume_partition(&self, partition: u32) -> Result<()> {
         info!(partition, "handoff cancelled; re-admitting writes");
+        self.check_authority(partition)?;
         // The cancelled handoff's target may have gotten as far as
         // acquiring the changelog fence, which leaves this pod's producer
         // epoch-stale — every write would fail as fenced until the next
@@ -220,6 +258,7 @@ mod tests {
                 },
             },
             pools,
+            None,
             None,
         )
     }

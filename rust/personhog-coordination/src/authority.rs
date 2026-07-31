@@ -1,0 +1,190 @@
+//! Serving authority, published for the data plane to consult.
+//!
+//! A pod's right to serve a partition rests on its etcd lease. The
+//! keepalive already detects loss and self-fences, but that detection is
+//! itself a running task: a process that is stopped, starved, or wedged
+//! stops renewing *and* stops noticing, and keeps answering requests out
+//! of a cache the new owner is already mutating. A fence nobody is alive
+//! to apply is not a fence.
+//!
+//! So the keepalive publishes rather than only reacts. It stamps this
+//! clock on every confirmed renewal; the request path compares the stamp
+//! against now and refuses once the lease could have expired at etcd. A
+//! stalled keepalive then fences implicitly — the stamp simply stops
+//! advancing — and the guarantee no longer depends on the liveness of
+//! the component whose failure it exists to survive.
+//!
+//! The margin is the same two thirds of the TTL the keepalive uses to
+//! declare loss, which places the refusal strictly before the moment the
+//! coordinator could treat the lease as expired and hand the partition
+//! to someone else. Requests are therefore refused while ownership is
+//! still merely *doubtful*, ahead of it becoming wrong.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// A lease-backed claim to serve, readable from the request path.
+///
+/// Cheap by construction: publishing is one relaxed atomic store on the
+/// keepalive's path, and checking is one load plus a comparison, so the
+/// hot path pays no lock and no syscall.
+#[derive(Debug)]
+pub struct AuthorityClock {
+    /// Fixed origin for the millisecond stamps below; `Instant` is not
+    /// representable in an atomic, and absolute time would drag wall
+    /// clock skew into a purely local measurement.
+    origin: Instant,
+    /// Milliseconds since `origin` at the last confirmed renewal.
+    confirmed_ms: AtomicU64,
+    /// How long a stamp stays good — the keepalive's renewal margin,
+    /// in milliseconds. Supplied by the session rather than at
+    /// construction: the lease TTL is coordination's business, and the
+    /// data plane holding this handle should not have to know it, let
+    /// alone agree with it. Zero until the first session claims it,
+    /// which reads as no authority.
+    margin_ms: AtomicU64,
+    /// Set when authority is known to be gone, which is stronger than a
+    /// stale stamp and never recovers within this session.
+    surrendered: AtomicBool,
+}
+
+impl AuthorityClock {
+    /// A clock holding no authority yet.
+    ///
+    /// Constructed once per process and shared: the data plane can hold
+    /// it from startup and read it without coordinating with whichever
+    /// session happens to be current. Before the first lease is granted
+    /// it reads as invalid, which is the right answer for a pod that has
+    /// not registered.
+    pub fn unclaimed() -> Self {
+        Self {
+            origin: Instant::now(),
+            confirmed_ms: AtomicU64::new(0),
+            margin_ms: AtomicU64::new(0),
+            surrendered: AtomicBool::new(true),
+        }
+    }
+
+    /// Claim authority for a newly granted lease.
+    ///
+    /// A session boundary is deliberately a reset rather than a fresh
+    /// object: the data plane holds one handle for the life of the
+    /// process, so a new claim has to be expressible through the handle
+    /// it already has.
+    pub fn begin_session(&self, margin: Duration) {
+        self.margin_ms
+            .store(margin.as_millis() as u64, Ordering::Relaxed);
+        self.confirm();
+        self.surrendered.store(false, Ordering::Relaxed);
+    }
+
+    /// The keepalive's renewal margin for a lease TTL: two thirds,
+    /// leaving the final third for the fence to land before the
+    /// coordinator can act on the expiry.
+    ///
+    /// The single definition of that fraction. The keepalive's own
+    /// deadline, the pod's heartbeat assertion, and this clock all read
+    /// it from here, because a data plane that stopped serving at a
+    /// different point than the keepalive declares loss would mean one
+    /// of the two is wrong.
+    pub fn renewal_margin(lease_ttl: i64) -> Duration {
+        Duration::from_secs(lease_ttl.max(0) as u64).mul_f64(2.0 / 3.0)
+    }
+
+    /// Record a confirmed renewal. Called by the keepalive, and only by
+    /// the keepalive: a renewal is the one event that proves the lease
+    /// was alive at a known instant.
+    pub fn confirm(&self) {
+        self.confirmed_ms
+            .store(self.origin.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Give up authority permanently for this session. Lease loss is
+    /// authoritative in a way a stale stamp is not, so it latches.
+    pub fn surrender(&self) {
+        self.surrendered.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether this pod may still act as the partition owner.
+    pub fn is_valid(&self) -> bool {
+        if self.surrendered.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.since_confirmed() < self.margin()
+    }
+
+    /// How long since the last confirmed renewal — the number the
+    /// request path is really asking about, exposed for metrics and for
+    /// error messages that have to explain a refusal.
+    pub fn since_confirmed(&self) -> Duration {
+        let confirmed = Duration::from_millis(self.confirmed_ms.load(Ordering::Relaxed));
+        self.origin.elapsed().saturating_sub(confirmed)
+    }
+
+    pub fn margin(&self) -> Duration {
+        Duration::from_millis(self.margin_ms.load(Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn granted(margin: Duration) -> AuthorityClock {
+        let clock = AuthorityClock::unclaimed();
+        clock.begin_session(margin);
+        clock
+    }
+
+    /// A pod that has not registered holds nothing, and must not serve
+    /// on the strength of a clock that merely has not aged out yet.
+    #[test]
+    fn an_unclaimed_clock_is_invalid() {
+        assert!(!AuthorityClock::unclaimed().is_valid());
+    }
+
+    #[test]
+    fn a_fresh_grant_is_valid() {
+        assert!(granted(Duration::from_secs(20)).is_valid());
+    }
+
+    /// A pod that loses its lease and registers again is serving under a
+    /// new claim; the handle the data plane holds has to carry that.
+    #[test]
+    fn a_new_session_restores_surrendered_authority() {
+        let clock = granted(Duration::from_secs(20));
+        clock.surrender();
+        assert!(!clock.is_valid());
+        clock.begin_session(Duration::from_secs(20));
+        assert!(clock.is_valid());
+    }
+
+    /// The point of the clock: authority lapses on its own once renewals
+    /// stop, with nothing running to notice they have.
+    #[test]
+    fn authority_lapses_without_renewal() {
+        let clock = granted(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(!clock.is_valid());
+    }
+
+    #[test]
+    fn a_confirmed_renewal_extends_authority() {
+        let clock = granted(Duration::from_millis(80));
+        std::thread::sleep(Duration::from_millis(50));
+        clock.confirm();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(clock.is_valid(), "the renewal should have moved the stamp");
+    }
+
+    /// Lease loss is final for the session: a renewal cannot arrive
+    /// afterwards, and treating one as valid would resurrect a claim the
+    /// coordinator has already reassigned.
+    #[test]
+    fn surrendered_authority_never_returns() {
+        let clock = granted(Duration::from_secs(20));
+        clock.surrender();
+        clock.confirm();
+        assert!(!clock.is_valid());
+    }
+}

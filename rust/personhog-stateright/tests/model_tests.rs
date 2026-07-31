@@ -50,6 +50,7 @@ fn base() -> HandoffModel {
         partitions: 1,
         variant: Variant::Current,
         warm_order: WarmOrder::FenceFirst,
+        lease_gated_reads: false,
         writes: 2,
         reads: 1,
         crashes: 0,
@@ -771,4 +772,49 @@ fn epoch_fenced_under_cancellation_is_safe_and_live() {
     .spawn_bfs()
     .join()
     .assert_properties();
+}
+
+/// Fencing and the read gate are complementary, not alternative.
+///
+/// Fencing alone leaves `strong_reads_complete` violated under the
+/// double zombie: it rejects a zombie's writes, not its reads, and the
+/// zombie keeps answering from a cache the new owner is already
+/// changing. The gate alone does not close it either — without fencing
+/// the zombie's write is lost, so the *legitimate* owner is the one
+/// serving a read missing an acked write. Only both together hold every
+/// safety property, which is why the leader's read gate is a
+/// prerequisite for enabling fencing rather than an independent
+/// improvement.
+#[test]
+fn fencing_and_lease_gated_reads_together_close_the_double_zombie() {
+    let cfg = |variant, gated| HandoffModel {
+        variant,
+        lease_gated_reads: gated,
+        crashes: 2,
+        zombie_window: 1,
+        ..base()
+    };
+    let stale_reads = |variant, gated| {
+        cfg(variant, gated)
+            .checker()
+            .threads(parallelism())
+            .spawn_bfs()
+            .join()
+            .discovery("strong_reads_complete")
+            .is_some()
+    };
+
+    assert!(
+        stale_reads(Variant::Current, true),
+        "the read gate alone must not close it: the honest owner serves a read missing the \
+         zombie's lost write"
+    );
+    assert!(
+        stale_reads(Variant::EpochFenced, false),
+        "fencing alone must not close it: the zombie still answers reads"
+    );
+    assert!(
+        !stale_reads(Variant::EpochFenced, true),
+        "together they must close it"
+    );
 }

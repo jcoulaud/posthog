@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 use personhog_common::partitioning::partition_for_person;
 
+use personhog_coordination::authority::AuthorityClock;
+
 use crate::cache::{
     approx_person_bytes, CacheLookup, CachedPerson, DirtyIndex, DirtyMark, PartitionedCache,
     PersonCacheKey,
@@ -86,9 +88,48 @@ pub struct PersonHogLeaderService {
     /// Present when broker-enforced epoch fencing is on; the write
     /// path produces through the partition's transaction window.
     fenced: Option<Arc<FencedChangelogProducers>>,
+    /// This pod's claim to serve, consulted before answering a strong
+    /// read. Present only when lease-gated reads are enabled.
+    authority: Option<Arc<AuthorityClock>>,
 }
 
 impl PersonHogLeaderService {
+    /// Refuse to answer as the partition's owner once this pod's lease
+    /// may have expired.
+    ///
+    /// The cache is only authoritative while the lease behind it is, and
+    /// the keepalive's own detection cannot be relied on to notice: a
+    /// process that is stopped, starved, or wedged stops renewing and
+    /// stops noticing together, then keeps serving state the new owner
+    /// is already changing. Reading the published stamp here makes the
+    /// lapse self-enforcing — nothing has to be alive to apply it.
+    ///
+    /// Refusal starts at the keepalive's renewal margin, strictly before
+    /// the coordinator could treat the lease as expired, so requests are
+    /// turned away while ownership is merely doubtful rather than after
+    /// it is wrong. `FailedPrecondition` is the admission fence's own
+    /// vocabulary: the router bounces and re-resolves toward whoever
+    /// actually owns the partition.
+    fn check_authority(&self, partition: u32) -> Result<(), Status> {
+        let Some(authority) = &self.authority else {
+            return Ok(());
+        };
+        if authority.is_valid() {
+            return Ok(());
+        }
+        counter!("personhog_leader_authority_lapsed_rejections_total").increment(1);
+        let since = authority.since_confirmed();
+        tracing::warn!(
+            partition,
+            ?since,
+            margin = ?authority.margin(),
+            "refusing to serve: no confirmed lease renewal within the margin"
+        );
+        Err(Status::failed_precondition(format!(
+            "serving authority lapsed: no confirmed lease renewal in {since:?}"
+        )))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cache: Arc<PartitionedCache>,
@@ -103,6 +144,7 @@ impl PersonHogLeaderService {
         size_limits: PropertySizeLimits,
         warnings: WarningsProducer,
         fenced: Option<Arc<FencedChangelogProducers>>,
+        authority: Option<Arc<AuthorityClock>>,
     ) -> Self {
         Self {
             cache,
@@ -117,6 +159,7 @@ impl PersonHogLeaderService {
             size_limits,
             warnings,
             fenced,
+            authority,
         }
     }
 
@@ -417,6 +460,7 @@ impl PersonHogLeader for PersonHogLeaderService {
         let partition = partition_from_metadata(&request)?;
         let req = request.into_inner();
         self.validate_partition(partition, req.team_id, req.person_id)?;
+        self.check_authority(partition)?;
         let cache_key = PersonCacheKey {
             team_id: req.team_id,
             person_id: req.person_id,
@@ -870,7 +914,62 @@ mod tests {
             PropertySizeLimits::new(655360, 524288),
             WarningsProducer::new(producer, "clickhouse_ingestion_warnings".to_string()),
             None,
+            None,
         )
+    }
+
+    /// The guarantee the clock exists for: a pod whose renewals have
+    /// stopped refuses to answer as the partition's owner, without
+    /// anything running to notice they stopped. The keepalive being
+    /// wedged is exactly the case the lease machinery cannot cover.
+    #[tokio::test]
+    async fn a_pod_whose_renewals_stopped_refuses_to_serve() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_millis(40));
+        let service = PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        };
+
+        service
+            .check_authority(0)
+            .expect("a freshly renewed lease serves");
+
+        // No renewal arrives, and nothing runs to observe that.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let err = service
+            .check_authority(0)
+            .expect_err("a lapsed lease must not serve");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    /// Losing the lease is decided immediately, not after the margin:
+    /// the coordinator may already be reassigning.
+    #[tokio::test]
+    async fn surrendering_the_lease_stops_reads_at_once() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_secs(30));
+        let service = PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        };
+
+        service.check_authority(0).expect("still the owner");
+        clock.surrender();
+        assert_eq!(
+            service.check_authority(0).unwrap_err().code(),
+            Code::FailedPrecondition
+        );
+    }
+
+    /// With the gate off the pod serves exactly as before, so the flag
+    /// is a real off switch rather than a partial one.
+    #[tokio::test]
+    async fn an_ungated_service_serves_regardless_of_renewals() {
+        let service = make_test_service().await;
+        assert!(service.authority.is_none());
+        service.check_authority(0).expect("no gate, no refusal");
     }
 
     #[test]

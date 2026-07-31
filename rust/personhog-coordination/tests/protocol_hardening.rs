@@ -7,6 +7,7 @@
 //! All tests run against a real etcd at localhost:2379 with per-test key
 //! prefixes, matching the conventions in `integration.rs`.
 
+use personhog_coordination::authority::AuthorityClock;
 mod common;
 
 use std::collections::HashMap;
@@ -2119,6 +2120,7 @@ async fn a_pod_attempt_failure_preserves_registration_and_partitions() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     tokio::spawn(async move { pod.run(token).await });
@@ -2787,6 +2789,7 @@ async fn lease_loss_during_attempt_backoff_self_fences_promptly() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     tokio::spawn(async move { pod.run(token).await });
@@ -2844,6 +2847,7 @@ async fn lease_loss_during_graceful_drain_self_fences_promptly() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join = tokio::spawn(async move { pod.run(token).await });
@@ -2924,6 +2928,7 @@ async fn a_connection_blip_does_not_fence_the_pod() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     tokio::spawn(async move { pod.run(token).await });
@@ -2983,6 +2988,7 @@ async fn a_sustained_outage_fences_at_the_renewal_margin() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     tokio::spawn(async move { pod.run(token).await });
@@ -3051,6 +3057,7 @@ async fn progress_between_failures_keeps_the_run_alive() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     tokio::spawn(async move { pod.run(token).await });
@@ -3110,6 +3117,7 @@ async fn budget_exhaustion_fences_before_deregistering() {
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join = tokio::spawn(async move { pod.run(token).await });

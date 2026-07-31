@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use common_kafka::config::KafkaConfig;
 use common_kafka::kafka_producer::{create_kafka_producer, KafkaContext};
 use health::HealthRegistry;
+use personhog_coordination::authority::AuthorityClock;
 use personhog_coordination::coordinator::{Coordinator, CoordinatorConfig};
 use personhog_coordination::error::Result;
 use personhog_coordination::pod::{PodConfig, PodHandle};
@@ -359,7 +360,9 @@ pub async fn start_leader_pod(
         warming,
         pools,
         None,
+        None,
     );
+    let authority = Arc::new(AuthorityClock::unclaimed());
     let pod = PodHandle::new(
         store,
         PodConfig {
@@ -371,6 +374,7 @@ pub async fn start_leader_pod(
         },
         Arc::new(handler),
         None,
+        authority,
     );
     let pod_token = cancel.child_token();
     tokio::spawn(async move { pod.run(pod_token).await });
@@ -388,6 +392,7 @@ pub async fn start_leader_pod(
         recovery,
         PropertySizeLimits::new(655360, 524288),
         WarningsProducer::new(kafka_producer, "clickhouse_ingestion_warnings".to_string()),
+        None,
         None,
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -441,7 +446,9 @@ pub async fn start_leader_pod_with_lease_ttl(
         warming,
         pools,
         None,
+        None,
     );
+    let authority = Arc::new(AuthorityClock::unclaimed());
     let pod = PodHandle::new(
         store,
         PodConfig {
@@ -455,6 +462,7 @@ pub async fn start_leader_pod_with_lease_ttl(
         },
         Arc::new(handler),
         None,
+        authority,
     );
     let pod_token = cancel.child_token();
     tokio::spawn(async move { pod.run(pod_token).await });
@@ -471,6 +479,7 @@ pub async fn start_leader_pod_with_lease_ttl(
         recovery,
         PropertySizeLimits::new(655360, 524288),
         WarningsProducer::new(kafka_producer, "clickhouse_ingestion_warnings".to_string()),
+        None,
         None,
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -560,6 +569,7 @@ pub async fn start_leader_with_pg_fallback(
         test_recovery(&mock_cluster.bootstrap_servers()),
         PropertySizeLimits::new(655360, 524288),
         WarningsProducer::new(kafka_producer, "clickhouse_ingestion_warnings".to_string()),
+        None,
         None,
     );
 
