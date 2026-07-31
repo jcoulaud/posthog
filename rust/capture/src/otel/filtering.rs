@@ -25,22 +25,34 @@ pub async fn check_quota(
     limiter: &CaptureQuotaLimiter,
     token: &str,
     span_events: &[SpanEvent],
-    gateway_verified: bool,
 ) -> Result<(), QuotaOutcome> {
-    let count = span_events.len();
+    let mut unverified = Vec::with_capacity(span_events.len());
+    let mut has_verified = false;
+    for event in span_events {
+        if event
+            .properties
+            .get("$ai_gateway_verified")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            has_verified = true;
+        } else {
+            unverified.push(event);
+        }
+    }
 
-    if gateway_verified {
-        // Match direct AI ingestion's global lookup while bypassing only the
-        // scoped LLM restriction. Direct AI events are retained at this limit.
+    if has_verified {
         limiter
             .is_quota_limited_v1(token, &QuotaResource::Events)
             .await;
+    }
+    if unverified.is_empty() {
         return Ok(());
     }
 
-    let refs: Vec<&SpanEvent> = span_events.iter().collect();
+    let count = unverified.len();
 
-    match limiter.check_and_filter(token, refs).await {
+    match limiter.check_and_filter(token, unverified).await {
         Ok(filtered) if filtered.len() == count => Ok(()),
         Ok(filtered) => {
             let dropped = count - filtered.len();
