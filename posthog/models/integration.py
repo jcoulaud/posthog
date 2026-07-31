@@ -360,6 +360,7 @@ class Integration(models.Model):
         TIKTOK_ADS = "tiktok-ads"
         TWILIO = "twilio"
         VERCEL = "vercel"
+        WHATSAPP = "whatsapp"
 
     team = models.ForeignKey("Team", on_delete=models.CASCADE)
 
