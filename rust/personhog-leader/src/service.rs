@@ -1074,8 +1074,13 @@ mod tests {
     }
 
     /// The gate has to be wired into the RPC, not merely implemented:
-    /// this drives `get_person` itself, so removing the call from the
-    /// handler fails here rather than passing quietly.
+    /// this drives `get_person` itself rather than the check in
+    /// isolation.
+    ///
+    /// It does not distinguish the two checks — a read that finds its
+    /// person in cache never waits, so either one refuses it, and both
+    /// return the same status. `a_read_admitted_before_the_lapse_still_
+    /// refuses_to_answer` is what pins the second.
     #[tokio::test]
     async fn get_person_refuses_once_authority_lapses() {
         let clock = Arc::new(AuthorityClock::unclaimed());
@@ -1130,10 +1135,14 @@ mod tests {
 
     /// A write is serving too, and the lease-loss path surrenders before
     /// it drains — so between the surrender and the local fence landing,
-    /// only this check stops a pod that no longer holds its lease from
+    /// this check is what stops a pod that no longer holds its lease from
     /// acking a mutation the successor will never see. Fencing covers the
     /// same ground when it is on, but it cannot be enabled first, so this
     /// is the only cover the intermediate rollout state has.
+    ///
+    /// Like its read-path counterpart it does not distinguish admission
+    /// from the pre-produce re-check; `a_write_admitted_before_the_lapse_
+    /// is_not_produced` pins the second.
     ///
     /// The person is seeded deliberately: without it a removed check
     /// would still surface `FailedPrecondition` from the ownership guard
