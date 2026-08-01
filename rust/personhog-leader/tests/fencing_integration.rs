@@ -65,6 +65,10 @@ async fn read_committed_count(topic: &str) -> usize {
     seen
 }
 
+/// Comfortably above the test config's 5s `message.timeout.ms`, which
+/// librdkafka requires the broker bound to cover.
+const BROKER_TXN_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn fenced_producers_with_window(topic: &str, window: Duration) -> FencedChangelogProducers {
     let mut kafka = test_kafka_config();
     kafka.kafka_hosts = KAFKA_BOOTSTRAP.to_string();
@@ -73,6 +77,7 @@ fn fenced_producers_with_window(topic: &str, window: Duration) -> FencedChangelo
         topic.to_string(),
         Duration::from_secs(10),
         Duration::from_secs(10),
+        BROKER_TXN_TIMEOUT,
         window,
     )
 }
@@ -85,6 +90,7 @@ fn fenced_producers(topic: &str) -> FencedChangelogProducers {
         topic.to_string(),
         Duration::from_secs(10),
         Duration::from_secs(10),
+        BROKER_TXN_TIMEOUT,
         Duration::from_millis(5),
     )
 }
@@ -220,8 +226,8 @@ async fn a_successors_init_aborts_the_predecessors_open_window() {
     {
         let p = Arc::clone(&first);
         let mut inflight = Box::pin(async move { p.produce(0, &test_person(1)).await });
-        // Long enough for the send to reach the broker, far too short for
-        // the 30s window to close.
+        // Long enough for the send to reach the broker, far too short
+        // for the window to close.
         tokio::time::timeout(Duration::from_millis(200), &mut inflight)
             .await
             .ok();
@@ -243,6 +249,31 @@ async fn a_successors_init_aborts_the_predecessors_open_window() {
         visible, 0,
         "an abandoned record must not become readable after the successor's init — \
          if this fails, the drain must wait for open windows before acking"
+    );
+
+    // Zero is also what a partition nothing was ever produced to looks
+    // like, so the same sequence without a successor has to show the
+    // record arriving. Otherwise this test passes just as well when the
+    // send never left the client.
+    let control_topic = format!("fence_abort_control_{}", uuid::Uuid::new_v4().simple());
+    let lone = Arc::new(fenced_producers_with_window(
+        &control_topic,
+        Duration::from_secs(1),
+    ));
+    lone.acquire(0).await.expect("control owner acquires");
+    {
+        let p = Arc::clone(&lone);
+        let mut inflight = Box::pin(async move { p.produce(0, &test_person(1)).await });
+        tokio::time::timeout(Duration::from_millis(200), &mut inflight)
+            .await
+            .ok();
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        read_committed_count(&control_topic).await,
+        1,
+        "with no successor the abandoned record commits — without this the assertion \
+         above cannot tell an aborted window from a send that never happened"
     );
 }
 
@@ -287,27 +318,69 @@ async fn a_completed_warm_keeps_its_fence() {
         .expect("a completed warm keeps a usable fence");
 }
 
-/// A commit whose outcome is unknown must not be reported as a failure.
+/// A producer whose abort exhausted its retries, or whose commit outcome
+/// stayed unknown, is left in a transaction state it cannot begin another
+/// window from. It is still installed, so nothing that checks for the
+/// *presence* of a fence can tell it apart from a working one.
 ///
-/// "Aborted" invites a retry, and a retry against a cache still holding
-/// the pre-write version produces a second record carrying the same
-/// version as the one that may already have committed — which the
-/// writer's strict guard resolves in favour of whichever arrived first,
-/// discarding the acked one. The doubt has to survive as doubt.
-#[test]
-fn an_unknown_commit_outcome_is_not_reported_as_a_failure() {
-    let indeterminate = FencedProduceError::Indeterminate("timed out".to_string());
-    let aborted = FencedProduceError::Failed("aborted: send failed".to_string());
+/// The partition must therefore stop reporting itself as fenced and start
+/// answering writes as an ownership question, which is what a router can
+/// act on and what a repair pass looks for. Reporting a retryable failure
+/// instead leaves every write on the partition failing for as long as the
+/// process lives, with reads still served and nothing to escalate.
+#[tokio::test]
+async fn a_condemned_producer_stops_claiming_the_partition() {
+    let topic = format!("fence_condemned_{}", uuid::Uuid::new_v4().simple());
+    let producers = fenced_producers(&topic);
+    producers.acquire(0).await.expect("acquire the fence");
+    producers
+        .produce(0, &test_person(1))
+        .await
+        .expect("a healthy fence writes");
 
-    assert!(
-        !matches!(indeterminate, FencedProduceError::Failed(_)),
-        "an unknown outcome must be distinguishable from a known abort"
-    );
-    assert!(matches!(aborted, FencedProduceError::Failed(_)));
-    assert!(
-        indeterminate.to_string().contains("unknown"),
-        "the message must say what is actually known: {indeterminate}"
-    );
+    producers.condemn_for_test(0);
+
+    match producers.produce(0, &test_person(2)).await {
+        Err(FencedProduceError::NotAcquired) => {}
+        other => panic!("a condemned producer must not answer as a live fence, got {other:?}"),
+    }
+
+    // And it must have been given up rather than merely refused once: a
+    // re-acquisition is the only thing that makes the partition writable
+    // again, and it can only run against a partition this pod no longer
+    // claims to fence.
+    producers.acquire(0).await.expect("re-acquire the fence");
+    producers
+        .produce(0, &test_person(3))
+        .await
+        .expect("a re-acquired fence writes again");
+}
+
+/// A guard outlives the fence it was taken for when a warm is abandoned
+/// and the partition is re-acquired before the guard drops. Releasing by
+/// partition alone would then evict the *replacement* — a live fence, on
+/// a partition this pod legitimately owns — and every write would fail as
+/// unowned until something re-acquired again.
+#[tokio::test]
+async fn an_abandoned_guard_does_not_evict_its_replacement() {
+    let topic = format!("fence_guard_id_{}", uuid::Uuid::new_v4().simple());
+    let producers = Arc::new(fenced_producers(&topic));
+    producers.acquire(0).await.expect("first acquire");
+
+    // A warm takes the fence, then never finishes.
+    let stale = FenceGuard::new(Arc::clone(&producers), 0);
+
+    // Meanwhile the partition is released and taken again, so what is
+    // installed is no longer what the guard is answerable for.
+    producers.release(0);
+    producers.acquire(0).await.expect("re-acquire");
+
+    drop(stale);
+
+    producers
+        .produce(0, &test_person(1))
+        .await
+        .expect("the replacement fence must survive the stale guard");
 }
 
 /// A partition can end up served without a fence — a broker rejection

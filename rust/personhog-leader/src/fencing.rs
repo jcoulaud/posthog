@@ -23,6 +23,7 @@
 //! aborted records (consumers run `read_committed`), so the coupling is
 //! visible only as grouped retryable errors.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fmt, mem};
@@ -38,12 +39,13 @@ use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tokio::sync::{oneshot, Notify};
 use tokio::task::spawn_blocking;
 use tokio::time::sleep;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use personhog_proto::personhog::types::v1::Person;
 
 use personhog_coordination::authority::AuthorityClock;
 
+use crate::config::FENCING_COMMIT_ATTEMPTS;
 use crate::inflight::InflightTracker;
 use crate::kafka::changelog_message_key;
 
@@ -122,7 +124,38 @@ struct PartitionFence {
     /// Signalled when a committing window finishes, letting blocked
     /// writers open the next one.
     window_closed: Notify,
+    /// Set when the producer is left in a transaction state no later
+    /// `begin_transaction` can recover from — an abort that exhausted its
+    /// retries, or a commit whose outcome stayed unknown.
+    ///
+    /// Such a producer is still installed, so presence alone cannot tell
+    /// a working fence from a dead one. Without this flag the repair pass
+    /// sees a fence, concludes there is nothing to do, and the partition
+    /// stays unwritable until a handoff moves it.
+    unusable: AtomicBool,
     commit_timeout: Duration,
+}
+
+impl PartitionFence {
+    /// Retire the producer: writes stop attempting it and the repair pass
+    /// stops treating the partition as fenced.
+    fn condemn(&self, partition: u32, reason: &'static str) {
+        if !self.unusable.swap(true, Ordering::Relaxed) {
+            counter!(
+                "personhog_leader_fence_condemned_total",
+                "reason" => reason
+            )
+            .increment(1);
+            error!(
+                partition,
+                reason, "changelog producer left unusable; awaiting re-acquisition"
+            );
+        }
+    }
+
+    fn is_usable(&self) -> bool {
+        !self.unusable.load(Ordering::Relaxed)
+    }
 }
 
 /// One seat in the open window, released on drop.
@@ -209,6 +242,43 @@ impl Drop for WindowSlot {
     }
 }
 
+/// Marks a window as committing, and clears the mark on drop.
+///
+/// Between closing a window and finishing its commit the gate reads as
+/// idle — `in_flight` is zero and the waiters have been taken — so only
+/// this mark keeps the next writer from beginning a transaction the
+/// producer is not free for. If the committer unwinds while it is set,
+/// nothing else ever clears it: every later write parks on
+/// `window_closed` until its own deadline expires, forever, and no
+/// repair path looks at a gate.
+struct CommittingMark {
+    fence: Arc<PartitionFence>,
+}
+
+impl CommittingMark {
+    fn take(fence: Arc<PartitionFence>) -> Self {
+        {
+            let mut gate = fence.gate.lock().unwrap();
+            gate.open = false;
+            gate.committing = true;
+        }
+        Self { fence }
+    }
+}
+
+impl Drop for CommittingMark {
+    fn drop(&mut self) {
+        // Deliberately tolerant of a poisoned gate: the mark existing is
+        // what wedges the partition, so it has to come off even when the
+        // lock's last holder panicked.
+        match self.fence.gate.lock() {
+            Ok(mut gate) => gate.committing = false,
+            Err(poisoned) => poisoned.into_inner().committing = false,
+        }
+        self.fence.window_closed.notify_waiters();
+    }
+}
+
 /// Holds a freshly acquired fence until the work that justified taking
 /// it succeeds, and gives it back otherwise.
 ///
@@ -222,14 +292,21 @@ impl Drop for WindowSlot {
 pub struct FenceGuard {
     fenced: Arc<FencedChangelogProducers>,
     partition: u32,
+    /// The fence this guard is answerable for. Releasing by partition
+    /// alone would drop whatever happens to be installed at drop time,
+    /// which after a release and a re-acquire is somebody else's
+    /// producer — the same hazard `forget_fence` checks for.
+    taken: Option<Arc<PartitionFence>>,
     armed: bool,
 }
 
 impl FenceGuard {
     pub fn new(fenced: Arc<FencedChangelogProducers>, partition: u32) -> Self {
+        let taken = fenced.installed(partition);
         Self {
             fenced,
             partition,
+            taken,
             armed: true,
         }
     }
@@ -248,7 +325,10 @@ impl Drop for FenceGuard {
                 partition = self.partition,
                 "releasing a fence taken for a warm that did not finish"
             );
-            self.fenced.release(self.partition);
+            match &self.taken {
+                Some(fence) => self.fenced.forget_fence(self.partition, fence),
+                None => self.fenced.release(self.partition),
+            }
         }
     }
 }
@@ -261,6 +341,10 @@ pub struct FencedChangelogProducers {
     topic: String,
     init_timeout: Duration,
     commit_timeout: Duration,
+    /// How long the broker keeps one of our windows open before
+    /// abandoning it; distinct from `commit_timeout`, which bounds only
+    /// this process's wait on the commit call.
+    broker_txn_timeout: Duration,
     /// How long an open window admits joiners before committing.
     window: Duration,
     partitions: DashMap<u32, Arc<PartitionFence>>,
@@ -272,6 +356,7 @@ impl FencedChangelogProducers {
         topic: String,
         init_timeout: Duration,
         commit_timeout: Duration,
+        broker_txn_timeout: Duration,
         window: Duration,
     ) -> Self {
         Self {
@@ -279,6 +364,7 @@ impl FencedChangelogProducers {
             topic,
             init_timeout,
             commit_timeout,
+            broker_txn_timeout,
             window,
             partitions: DashMap::new(),
         }
@@ -292,16 +378,17 @@ impl FencedChangelogProducers {
         let kafka = self.kafka.clone();
         let tid = transactional_id(&self.topic, partition);
         let timeout = self.init_timeout;
+        let broker_txn_timeout = self.broker_txn_timeout;
         let start = Instant::now();
-        let producer =
-            spawn_blocking(move || TransactionalProducer::from_config(&kafka, &tid, timeout))
-                .await
-                .map_err(|e| format!("fence init join: {e}"))?
-                .map_err(|e| {
-                    counter!("personhog_leader_fence_init_total", "outcome" => "error")
-                        .increment(1);
-                    format!("fence init: {e}")
-                })?;
+        let producer = spawn_blocking(move || {
+            TransactionalProducer::from_config_bounded(&kafka, &tid, timeout, broker_txn_timeout)
+        })
+        .await
+        .map_err(|e| format!("fence init join: {e}"))?
+        .map_err(|e| {
+            counter!("personhog_leader_fence_init_total", "outcome" => "error").increment(1);
+            format!("fence init: {e}")
+        })?;
         counter!("personhog_leader_fence_init_total", "outcome" => "ok").increment(1);
         histogram!("personhog_leader_fence_init_ms").record(start.elapsed().as_secs_f64() * 1000.0);
         self.partitions.insert(
@@ -317,10 +404,16 @@ impl FencedChangelogProducers {
                 }),
                 sends_settled: Notify::new(),
                 window_closed: Notify::new(),
+                unusable: AtomicBool::new(false),
                 commit_timeout: self.commit_timeout,
             }),
         );
         Ok(())
+    }
+
+    /// The fence currently installed for a partition, if any.
+    fn installed(&self, partition: u32) -> Option<Arc<PartitionFence>> {
+        self.partitions.get(&partition).map(|f| Arc::clone(&f))
     }
 
     /// Drop the partition's fence with ownership. The broker-side epoch
@@ -329,9 +422,31 @@ impl FencedChangelogProducers {
         self.partitions.remove(&partition);
     }
 
-    /// Whether a fence is installed for the partition.
+    /// Whether this pod holds a *usable* fence for the partition.
+    ///
+    /// Deliberately not mere presence. A condemned producer is still
+    /// installed, and answering "yes" for one would tell the repair pass
+    /// that a partition it must re-acquire needs nothing — which is
+    /// exactly how such a partition stayed unwritable until a handoff
+    /// moved it.
     pub fn holds(&self, partition: u32) -> bool {
-        self.partitions.contains_key(&partition)
+        self.partitions
+            .get(&partition)
+            .is_some_and(|fence| fence.is_usable())
+    }
+
+    /// Put the partition's producer into the state a failed abort or an
+    /// unknown commit leaves it in.
+    ///
+    /// Reaching that state for real takes a broker fault landing inside a
+    /// transaction, which no test can stage against a healthy cluster —
+    /// but what happens *afterwards* is the entire reason the state is
+    /// tracked, so the aftermath has to be reachable.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn condemn_for_test(&self, partition: u32) {
+        if let Some(fence) = self.partitions.get(&partition) {
+            fence.condemn(partition, "test");
+        }
     }
 
     /// Produce one changelog record inside the partition's current
@@ -351,6 +466,17 @@ impl FencedChangelogProducers {
                 FencedProduceError::NotAcquired
             })?;
 
+        // A condemned producer cannot begin another transaction, so
+        // evict it here rather than discovering that one failed
+        // `begin_transaction` at a time. Dropping it turns every later
+        // write into an ownership answer the router can act on, and
+        // leaves the partition in the state the repair pass looks for.
+        if !fence.is_usable() {
+            self.forget_fence(partition, &fence);
+            counter!("personhog_leader_kafka_produce_errors_total").increment(1);
+            return Err(FencedProduceError::NotAcquired);
+        }
+
         // Join the open window, or open one. A window mid-commit admits
         // no joiners; wait for it to close and retry.
         let join_start = Instant::now();
@@ -360,7 +486,12 @@ impl FencedChangelogProducers {
             let closed = fence.window_closed.notified();
             tokio::pin!(closed);
             closed.as_mut().enable();
-            {
+            // Only the gate's own fields are touched under its lock.
+            // Classifying a failure consults the producer's fatal state
+            // and can evict the fence, so it happens after the guard is
+            // gone: the gate is a std mutex, and a panic while it is held
+            // poisons it for every writer on the partition.
+            let begin_failed = {
                 let mut gate = fence.gate.lock().unwrap();
                 if gate.open {
                     gate.in_flight += 1;
@@ -369,15 +500,22 @@ impl FencedChangelogProducers {
                 if !gate.committing && gate.in_flight == 0 && gate.waiters.is_empty() {
                     // Idle: open a new window. BeginTxn is a local
                     // librdkafka state transition, safe inline.
-                    fence.producer.inner().begin_transaction().map_err(|e| {
-                        counter!("personhog_leader_kafka_produce_errors_total").increment(1);
-                        self.classify(&fence, partition, e)
-                    })?;
-                    gate.open = true;
-                    gate.in_flight = 1;
-                    gate.poisoned = false;
-                    break true;
+                    match fence.producer.inner().begin_transaction() {
+                        Ok(()) => {
+                            gate.open = true;
+                            gate.in_flight = 1;
+                            gate.poisoned = false;
+                            break true;
+                        }
+                        Err(e) => Some(e),
+                    }
+                } else {
+                    None
                 }
+            };
+            if let Some(e) = begin_failed {
+                counter!("personhog_leader_kafka_produce_errors_total").increment(1);
+                return Err(self.classify(&fence, partition, e));
             }
             closed.await;
         };
@@ -419,17 +557,22 @@ impl FencedChangelogProducers {
                         .record(produce_start.elapsed().as_secs_f64() * 1000.0);
                     Ok(offset)
                 }
+                // These fire per write, and a broker outage fails every
+                // write, so the aggregate is the useful signal and the
+                // per-request detail belongs at debug. The caller logs
+                // the classified outcome, and the counters below carry
+                // the rate.
                 Ok(Err((e, _))) => {
-                    error!(partition, error = %e, "fenced send delivery failed");
+                    debug!(partition, error = %e, "fenced send delivery failed");
                     Err(Some(e))
                 }
                 Err(_cancelled) => {
-                    error!(partition, "fenced send cancelled");
+                    debug!(partition, "fenced send cancelled");
                     Err(None)
                 }
             },
             Err((e, _)) => {
-                error!(partition, error = %e, "fenced send enqueue failed");
+                debug!(partition, error = %e, "fenced send enqueue failed");
                 Err(Some(e))
             }
         };
@@ -535,15 +678,42 @@ const ABORT_RETRIES: usize = 3;
 
 /// How many times a retriable commit is re-attempted before its outcome
 /// is declared unknown.
-const COMMIT_RETRIES: usize = 3;
+///
+/// Derived from the attempt budget the lease runway affords, rather than
+/// chosen independently: `validate_fencing_timescales` sizes the fencing
+/// timeouts so that exactly this many attempts still fit inside the
+/// window the keepalive reserves for self-fencing.
+const COMMIT_RETRIES: usize = FENCING_COMMIT_ATTEMPTS as usize - 1;
 
-/// What is known about a window's records after a failed commit.
+/// What is known about a window's records after a failed commit, and
+/// whether the producer survived learning it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommitOutcome {
     /// The transaction is definitely aborted; nothing became visible.
     Aborted,
+    /// Definitely aborted, but the abort never landed, so the producer is
+    /// stuck in a state it cannot begin another transaction from.
+    AbortedProducerDead,
     /// Whether the records committed is not known.
+    ///
+    /// There is no healthy-producer form of this: a commit fails without
+    /// a definite outcome only when the error is neither retriable nor
+    /// abort-requiring, which is librdkafka's fatal class, or when the
+    /// follow-up abort itself failed. Both leave the producer unusable.
     Unknown,
+}
+
+impl CommitOutcome {
+    /// Whether the records are known not to have become visible.
+    fn is_aborted(self) -> bool {
+        matches!(self, Self::Aborted | Self::AbortedProducerDead)
+    }
+
+    /// Whether the producer must be replaced before this partition can
+    /// take another write.
+    fn producer_dead(self) -> bool {
+        matches!(self, Self::AbortedProducerDead | Self::Unknown)
+    }
 }
 
 /// Transaction errors librdkafka documents as safe to re-attempt.
@@ -593,14 +763,11 @@ async fn commit_window_after(
 ) {
     sleep(window).await;
 
-    // Stop admitting joiners, then wait for outstanding sends. The
-    // committing flag holds until the commit finishes so no writer can
-    // begin the next transaction while this one is still resolving.
-    {
-        let mut gate = fence.gate.lock().unwrap();
-        gate.open = false;
-        gate.committing = true;
-    }
+    // Stop admitting joiners, then wait for outstanding sends. The mark
+    // holds until this function returns — by any path — so no writer can
+    // begin the next transaction while this one is still resolving, and
+    // none is stranded if it unwinds.
+    let _committing = CommittingMark::take(Arc::clone(&fence));
     loop {
         // Register interest before inspecting the gate: a settle that
         // fires between the check and the await must not be lost.
@@ -630,10 +797,10 @@ async fn commit_window_after(
     let commit_start = Instant::now();
     let result = spawn_blocking(move || {
         if poisoned {
-            // Retry a retriable abort: leaving the producer in its
-            // abortable state would fail every later `begin_transaction`
-            // with an error no path re-acquires from, stranding the
-            // partition until the next handoff.
+            // Retry a retriable abort: a producer left in its abortable
+            // state fails every later `begin_transaction`, so exhausting
+            // the retries costs the producer itself, not just this
+            // window.
             let mut abort = producer.abort_transaction(timeout);
             for _ in 0..ABORT_RETRIES {
                 match &abort {
@@ -644,11 +811,18 @@ async fn commit_window_after(
                     _ => break,
                 }
             }
-            if let Err(e) = &abort {
-                counter!("personhog_leader_fence_abort_exhausted_total").increment(1);
-                error!(error = %e, "abort of a poisoned window failed; producer left unusable");
+            match abort {
+                Ok(()) => Err((KafkaError::Canceled, CommitOutcome::Aborted)),
+                // The records are still definitely not visible — an abort
+                // that did not land leaves the transaction open, and open
+                // is not committed. What is lost is the producer: it stays
+                // in its abortable state, where every later
+                // `begin_transaction` fails.
+                Err(e) => {
+                    counter!("personhog_leader_fence_abort_exhausted_total").increment(1);
+                    Err((e, CommitOutcome::AbortedProducerDead))
+                }
             }
-            Err((KafkaError::Canceled, CommitOutcome::Aborted))
         } else {
             // A commit that fails is not the same as a commit that did
             // not happen. librdkafka distinguishes three cases and the
@@ -672,13 +846,31 @@ async fn commit_window_after(
             match attempt {
                 Ok(()) => Ok(()),
                 Err(KafkaError::Transaction(e)) if e.txn_requires_abort() => {
-                    if let Err(abort_err) = producer.abort_transaction(timeout) {
+                    // Retried on the same terms as the poisoned path: an
+                    // abort that fails once for a moving coordinator is
+                    // the same event there, and giving up after one
+                    // attempt turns a recoverable abort into a dead
+                    // producer and a definite outcome into an unknown one.
+                    let mut abort = producer.abort_transaction(timeout);
+                    for _ in 0..ABORT_RETRIES {
+                        match &abort {
+                            Err(e) if e.rdkafka_error_code().is_some_and(retriable_txn_error) => {
+                                warn!(error = %e, "abort after a failed commit failed; retrying");
+                                abort = producer.abort_transaction(timeout);
+                            }
+                            _ => break,
+                        }
+                    }
+                    match abort {
+                        Ok(()) => Err((KafkaError::Transaction(e), CommitOutcome::Aborted)),
                         // The abort itself is now in doubt, so the
                         // records are too.
-                        return Err((abort_err, CommitOutcome::Unknown));
+                        Err(abort_err) => Err((abort_err, CommitOutcome::Unknown)),
                     }
-                    Err((KafkaError::Transaction(e), CommitOutcome::Aborted))
                 }
+                // Neither retriable nor abort-requiring: the transaction
+                // is left open with its fate unknown, and this producer
+                // has no way back to a state where it can begin another.
                 Err(e) => Err((e, CommitOutcome::Unknown)),
             }
         }
@@ -694,6 +886,16 @@ async fn commit_window_after(
         Ok(Err((e, outcome))) => {
             histogram!("personhog_leader_fence_commit_ms", "outcome" => "failed")
                 .record(commit_start.elapsed().as_secs_f64() * 1000.0);
+            if outcome.producer_dead() {
+                fence.condemn(
+                    partition,
+                    if outcome.is_aborted() {
+                        "abort_exhausted"
+                    } else {
+                        "commit_indeterminate"
+                    },
+                );
+            }
             if is_fenced(&e) || producer_fenced(fence.producer.inner()) {
                 // A poisoned window's fence was already classified and
                 // counted where the send failed; counting again here
@@ -712,7 +914,7 @@ async fn commit_window_after(
                     "changelog window fenced by a newer owner — this pod's claim is stale"
                 );
                 Err(FencedProduceError::Fenced)
-            } else if outcome == CommitOutcome::Aborted {
+            } else if outcome.is_aborted() {
                 counter!(
                     "personhog_leader_fence_aborts_total",
                     "partition" => partition.to_string()
@@ -751,8 +953,6 @@ async fn commit_window_after(
         // nothing to deliver.
         waiter.send(clone_outcome(&outcome)).ok();
     }
-    fence.gate.lock().unwrap().committing = false;
-    fence.window_closed.notify_waiters();
 }
 
 /// Materialize every fencing series at startup so deploy-window bursts
@@ -767,6 +967,9 @@ pub fn preregister_fencing_metrics(partitions: u32) {
     counter!("personhog_leader_fence_slots_abandoned_total").increment(0);
     counter!("personhog_leader_fence_abandoned_total").increment(0);
     counter!("personhog_leader_fence_abort_exhausted_total").increment(0);
+    for reason in ["abort_exhausted", "commit_indeterminate"] {
+        counter!("personhog_leader_fence_condemned_total", "reason" => reason).increment(0);
+    }
     counter!("personhog_leader_fence_commit_retries_total").increment(0);
     counter!("personhog_leader_fenced_partition_drops_total").increment(0);
     counter!("personhog_leader_kafka_produce_errors_total").increment(0);

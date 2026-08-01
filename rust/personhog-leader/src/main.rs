@@ -160,6 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .increment(0);
         }
     }
+    counter!("personhog_leader_unresolved_versions_total").increment(0);
+    gauge!("personhog_leader_unresolved_versions").set(0.0);
 
     tokio::spawn(async move {
         let _guard = metrics_handle.process_scope();
@@ -245,8 +247,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.ingestion_warnings_topic.clone(),
     );
     let fenced = if config.kafka_transactional_fencing {
+        // Every one of these is derived from LEASE_TTL rather than set
+        // directly, so an operator debugging a fenced-write timeout has
+        // no way to recover them without re-running the derivation by
+        // hand.
         tracing::info!(
             window_ms = config.fencing_window_ms,
+            message_timeout_ms = config.fencing_message_timeout().as_millis(),
+            txn_timeout_ms = config.fencing_txn_timeout().as_millis(),
+            broker_txn_timeout_ms = config.fencing_broker_txn_timeout().as_millis(),
+            lease_runway_ms = config.lease_fence_runway().as_millis(),
             "broker-enforced epoch fencing enabled for the changelog"
         );
         preregister_fencing_metrics(num_partitions);
@@ -261,6 +271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.kafka_person_state_topic.clone(),
             config.fencing_txn_timeout(),
             config.fencing_txn_timeout(),
+            config.fencing_broker_txn_timeout(),
             Duration::from_millis(config.fencing_window_ms),
         )))
     } else {
@@ -374,6 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&warm_pools),
         fenced.clone(),
         gated_authority.clone(),
+        service.emitted_versions(),
     );
     let advertise_address =
         personhog_leader::config::derive_advertise_address(&config.grpc_address, &config.pod_ip)
@@ -663,6 +675,8 @@ async fn discover_own_controller(
 /// precedes a series' first sample.
 fn preregister_metrics() {
     counter!("personhog_leader_indeterminate_evictions_total").increment(0);
+    counter!("personhog_leader_unresolved_versions_total").increment(0);
+    gauge!("personhog_leader_unresolved_versions").set(0.0);
     counter!("personhog_leader_warmed_messages_total").increment(0);
     counter!("personhog_leader_warm_retries_exhausted_total", "stage" => "committed_offset")
         .increment(0);

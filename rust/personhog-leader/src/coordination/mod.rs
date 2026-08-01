@@ -9,6 +9,7 @@ use personhog_coordination::pod::HandoffHandler;
 use tracing::{error, info};
 
 use crate::cache::{DirtyIndex, PartitionedCache};
+use crate::emitted::EmittedVersions;
 use crate::fencing::{heal_fence, FenceGuard, FencedChangelogProducers};
 use crate::inflight::InflightTracker;
 use crate::warming::{warm_from_kafka, WarmClientPools, WarmingConfig};
@@ -60,9 +61,13 @@ pub struct LeaderHandoffHandler {
     /// owns the partition, so an unchecked acquire lets a zombie waking
     /// inside its lease window fence the legitimate owner.
     authority: Option<Arc<AuthorityClock>>,
+    /// Shared with the service, so that giving up a partition also gives
+    /// up the version floors held for its persons.
+    emitted_versions: Arc<EmittedVersions>,
 }
 
 impl LeaderHandoffHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cache: Arc<PartitionedCache>,
         inflight: Arc<InflightTracker>,
@@ -71,6 +76,7 @@ impl LeaderHandoffHandler {
         pools: Arc<WarmClientPools>,
         fenced: Option<Arc<FencedChangelogProducers>>,
         authority: Option<Arc<AuthorityClock>>,
+        emitted_versions: Arc<EmittedVersions>,
     ) -> Self {
         Self {
             cache,
@@ -80,6 +86,7 @@ impl LeaderHandoffHandler {
             pools,
             fenced,
             authority,
+            emitted_versions,
         }
     }
 
@@ -240,6 +247,10 @@ impl HandoffHandler for LeaderHandoffHandler {
         // The new owner's warming rebuilds its own marks; stale marks here
         // would only pin memory for a partition this pod no longer serves.
         self.dirty_index.clear_partition(partition);
+        // The incoming owner derives versions from the changelog, which
+        // is the authority these floors stood in for; carrying them would
+        // only constrain a partition this pod no longer serves.
+        self.emitted_versions.clear_partition(partition);
         info!(partition, "partition released");
         Ok(())
     }
@@ -322,6 +333,7 @@ mod tests {
             pools,
             None,
             None,
+            Arc::new(EmittedVersions::new()),
         )
     }
 
