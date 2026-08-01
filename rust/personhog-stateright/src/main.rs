@@ -50,6 +50,7 @@ fn main() {
         variant,
         warm_order,
         lease_gated_reads: false,
+        claim_recovers: true,
         claim_detection: ClaimDetection::Prompt,
         writes: 2,
         reads: 1,

@@ -299,6 +299,15 @@ pub enum Action {
     /// registration watch firing). Only reachable under delayed
     /// detection; prompt detection drops the claim with the lease.
     NoticeLeaseLoss(PodId),
+    /// A pod's published claim ages past the renewal margin while its
+    /// registration still stands (production: the keepalive stops
+    /// confirming, but etcd holds the lease until the full TTL). The pod
+    /// refuses to serve and the coordinator, seeing a live registration,
+    /// reassigns nothing.
+    AuthorityLapse(PodId),
+    /// A renewal lands and the claim comes back, without the session ever
+    /// having ended.
+    AuthorityRenew(PodId),
     /// A previously-dead pod rejoins under its old name: fresh
     /// registration, fresh lease, empty memory (production: normal pod
     /// startup; its partitions come back via Warming handoffs from the

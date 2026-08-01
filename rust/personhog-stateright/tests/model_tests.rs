@@ -51,6 +51,7 @@ fn base() -> HandoffModel {
         variant: Variant::Current,
         warm_order: WarmOrder::FenceFirst,
         lease_gated_reads: false,
+        claim_recovers: true,
         claim_detection: ClaimDetection::Prompt,
         writes: 2,
         reads: 1,
@@ -790,6 +791,7 @@ fn fencing_and_lease_gated_reads_together_close_the_double_zombie() {
     let cfg = |variant, gated| HandoffModel {
         variant,
         lease_gated_reads: gated,
+        claim_recovers: true,
         crashes: 2,
         zombie_window: 1,
         ..base()
@@ -828,6 +830,7 @@ fn a_lease_gated_fleet_is_safe_and_live() {
     HandoffModel {
         variant: Variant::EpochFenced,
         lease_gated_reads: true,
+        claim_recovers: true,
         crashes: 1,
         zombie_window: 1,
         ..base()
@@ -837,6 +840,41 @@ fn a_lease_gated_fleet_is_safe_and_live() {
     .spawn_bfs()
     .join()
     .assert_properties();
+}
+
+/// The state the stability property's claim conjunct exists for, made
+/// reachable and then made permanent.
+///
+/// Production's clock lapses at two thirds of the TTL while etcd holds
+/// the registration for the full TTL, so for that third a pod refuses
+/// every read while still looking alive to the coordinator — which
+/// therefore reassigns nothing. Tying the claim to the registration, as
+/// the model previously did, made `registered` imply `claims_authority`
+/// and left the conjunct unable to change any verdict.
+///
+/// With recovery available the fleet converges; without it the black
+/// hole is permanent and stability has to notice. If this stops
+/// producing a counterexample, the conjunct has gone back to being
+/// decorative.
+#[test]
+fn a_lapsed_claim_that_never_returns_fails_stability() {
+    let checker = HandoffModel {
+        variant: Variant::EpochFenced,
+        lease_gated_reads: true,
+        claim_recovers: false,
+        crashes: 1,
+        zombie_window: 1,
+        ..base()
+    }
+    .checker()
+    .threads(parallelism())
+    .spawn_bfs()
+    .join();
+    assert!(
+        checker.discovery("converges_to_stable").is_some(),
+        "an owner that refuses its own reads while looking alive to the coordinator \
+         must fail stability rather than passing it"
+    );
 }
 
 /// What the registration watch buys, as a verdict rather than prose.
@@ -853,6 +891,7 @@ fn prompt_detection_is_what_makes_the_read_gate_hold() {
         HandoffModel {
             variant: Variant::EpochFenced,
             lease_gated_reads: true,
+            claim_recovers: true,
             claim_detection: detection,
             crashes: 2,
             zombie_window: 1,

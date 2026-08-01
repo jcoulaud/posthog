@@ -120,6 +120,11 @@ pub struct HandoffModel {
     /// pod that has lost its registration keeps answering out of a cache
     /// the new owner is already changing.
     pub lease_gated_reads: bool,
+    /// Whether a lapsed claim can come back without the session ending
+    /// (production: the keepalive confirming a renewal again). Turning it
+    /// off is what makes the black hole permanent, which is the only way
+    /// to show that stability actually notices one.
+    pub claim_recovers: bool,
     /// Total client writes the checker may inject.
     pub writes: u8,
     /// Total strong reads the checker may inject.
@@ -614,6 +619,15 @@ impl Model for HandoffModel {
             actions.push(Action::SelfFence(pod));
             if self.claim_detection == ClaimDetection::Delayed {
                 actions.push(Action::NoticeLeaseLoss(pod));
+            }
+            // Only meaningful when something consults the claim, and the
+            // state space is expensive enough that exploring it in
+            // configurations that ignore the claim would buy nothing.
+            if self.lease_gated_reads {
+                actions.push(Action::AuthorityLapse(pod));
+                if self.claim_recovers {
+                    actions.push(Action::AuthorityRenew(pod));
+                }
             }
             if state.rejoins_left > 0 {
                 actions.push(Action::Join(pod));
@@ -1175,6 +1189,27 @@ impl Model for HandoffModel {
             }
             // The gap the registration watch closes: between losing the
             // lease and noticing, the pod still answers as the owner.
+            // The window production's clock actually creates: the stamp
+            // ages past the margin at two thirds of the TTL, but etcd
+            // holds the registration until the full TTL. For that third
+            // the pod refuses to serve while still looking alive to the
+            // coordinator — the black hole `converges_to_stable` has to
+            // be able to see, and which tying the claim to the
+            // registration made unrepresentable.
+            Action::AuthorityLapse(x) => {
+                let pod = &state.pods[&x];
+                if !pod.registered || !pod.claims_authority {
+                    return None;
+                }
+                state.pods.get_mut(&x).unwrap().claims_authority = false;
+            }
+            Action::AuthorityRenew(x) => {
+                let pod = &state.pods[&x];
+                if !pod.registered || pod.claims_authority {
+                    return None;
+                }
+                state.pods.get_mut(&x).unwrap().claims_authority = true;
+            }
             Action::NoticeLeaseLoss(x) => {
                 let pod = &state.pods[&x];
                 if pod.registered || !pod.claims_authority {
