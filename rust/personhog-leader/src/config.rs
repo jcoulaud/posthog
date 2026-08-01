@@ -365,7 +365,9 @@ impl Config {
         // the dependency is refused at startup rather than documented.
         if !self.lease_gated_authority {
             return Err(
-                "KAFKA_TRANSACTIONAL_FENCING requires LEASE_GATED_AUTHORITY: unless                  acquisition is gated on holding the lease, a pod whose lease has lapsed                  can take the changelog fence away from the partition's real owner"
+                "KAFKA_TRANSACTIONAL_FENCING requires LEASE_GATED_AUTHORITY: unless \
+                 acquisition is gated on holding the lease, a pod whose lease has lapsed \
+                 can take the changelog fence away from the partition's real owner"
                     .to_string(),
             );
         }
