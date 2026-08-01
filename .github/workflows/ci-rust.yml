@@ -633,6 +633,10 @@ jobs:
             # write path's error mapping — ships with no end-to-end
             # coverage at all.
             #
+            # The gate rides along because startup refuses fencing without
+            # it: acquisition moves a partition's broker epoch, and a pod
+            # that has stopped renewing has no standing to do that.
+            #
             # Guarded on the flag existing so a branch that predates
             # --leader-env skips it rather than failing before its own
             # tests run.
@@ -644,6 +648,7 @@ jobs:
                   fi
                   ./target/debug/personhog-test-harness gate \
                     --leader-env KAFKA_TRANSACTIONAL_FENCING=true \
+                    --leader-env LEASE_GATED_AUTHORITY=true \
                     --leaders 3 --partitions 8 --persons 100 --concurrency 10 --duration 18s \
                     --zombie-after 6s --zombie-duration 6s \
                     --writer-pause-after 4s --writer-pause-duration 6s

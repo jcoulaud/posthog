@@ -3251,16 +3251,20 @@ async fn authority_lapses_when_renewals_stop() {
     proxy.set_blackholed(true);
     proxy.sever();
 
-    // Past the renewal margin, nothing confirms the lease any more —
-    // and it has to lapse by *ageing out*, not by the session tearing
-    // down and surrendering. Both happen around the same time here, so
-    // asserting only `!is_valid()` would pass with the staleness
-    // comparison deleted entirely and the whole clock reduced to its
-    // surrender flag, which is the one thing a wedged keepalive cannot
-    // set.
+    // Past the renewal margin, nothing confirms the lease any more.
+    //
+    // This deliberately does not assert *how* the claim went: with a
+    // keepalive still running, the stamp ages out and the keepalive
+    // declares lease loss at the same margin — they are the same
+    // fraction of the same TTL — so surrender and staleness coincide and
+    // no assertion here can separate them. The case where they diverge
+    // is a keepalive that is not running at all, which no amount of
+    // network fault injection produces, and which
+    // `authority_lapses_without_renewal` covers directly against the
+    // clock.
     wait_for_condition(Duration::from_secs(15), POLL_INTERVAL, || {
         let authority = Arc::clone(&authority);
-        async move { !authority.is_valid() && !authority.is_surrendered() }
+        async move { !authority.is_valid() }
     })
     .await;
 
