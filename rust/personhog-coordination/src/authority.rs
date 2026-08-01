@@ -146,6 +146,25 @@ impl AuthorityClock {
         self.surrendered.load(Ordering::Relaxed)
     }
 
+    /// A clock whose last confirmed renewal is `age` old.
+    ///
+    /// The stamp is stored relative to a fixed origin, so a test cannot
+    /// age it by writing to it — it would have to go below the origin,
+    /// and `confirm_at` saturates there. Ageing the origin is the only
+    /// way to express "renewals stopped this long ago" without sleeping
+    /// through the margin, and a sleep long enough to be reliable on a
+    /// loaded runner is long enough to slow every run.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stale_for(margin: Duration, age: Duration) -> Self {
+        let now = Instant::now();
+        Self {
+            origin: now.checked_sub(age).unwrap_or(now),
+            confirmed_ms: AtomicU64::new(0),
+            margin_ms: AtomicU64::new(margin.as_millis() as u64),
+            surrendered: AtomicBool::new(false),
+        }
+    }
+
     /// Whether any session has claimed this clock yet. Before the first
     /// grant there is no margin to compare against, so age is not a
     /// meaningful reading.
@@ -189,19 +208,26 @@ mod tests {
 
     /// The point of the clock: authority lapses on its own once renewals
     /// stop, with nothing running to notice they have.
+    ///
+    /// Anchored in the past rather than slept through — `begin_session`
+    /// takes the instant the lease's countdown started precisely so a
+    /// caller can say "this session is already old", and a sleep would
+    /// make the test a race against a loaded runner for no added
+    /// coverage.
     #[test]
     fn authority_lapses_without_renewal() {
-        let clock = granted(Duration::from_millis(50));
-        std::thread::sleep(Duration::from_millis(80));
+        let margin = Duration::from_secs(20);
+        let clock = AuthorityClock::stale_for(margin, margin + Duration::from_secs(1));
         assert!(!clock.is_valid());
     }
 
     #[test]
     fn a_confirmed_renewal_extends_authority() {
-        let clock = granted(Duration::from_millis(80));
-        std::thread::sleep(Duration::from_millis(50));
+        let margin = Duration::from_secs(20);
+        let clock = AuthorityClock::stale_for(margin, margin + Duration::from_secs(1));
+        assert!(!clock.is_valid(), "stale before the renewal");
+
         clock.confirm();
-        std::thread::sleep(Duration::from_millis(50));
         assert!(clock.is_valid(), "the renewal should have moved the stamp");
     }
 

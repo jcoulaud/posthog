@@ -405,32 +405,61 @@ async fn healing_retakes_a_fence_for_a_served_partition() {
 }
 
 /// Healing takes the partition's epoch from whoever holds it, so a pod
-/// that cannot vouch for its own claim must not do it — that is how a
-/// waking zombie takes a partition from its real owner. Nor may it heal
-/// a partition a handoff is moving.
+/// that cannot vouch for its own claim must not start the round trip at
+/// all — `init_transactions` cannot be undone once it returns, and the
+/// post-acquire check can only stop *this* pod from building on a fence
+/// it already stole.
+///
+/// The assertion is therefore on the victim. Asking only whether we
+/// ended up holding a fence cannot tell the pre-check from the
+/// post-check: both leave us empty-handed, and only one of them leaves
+/// the legitimate owner still able to write.
 #[tokio::test]
-async fn healing_refuses_without_standing() {
+async fn healing_without_standing_does_not_steal_the_epoch() {
     let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
-    let producers = Arc::new(fenced_producers(&topic));
     let inflight = InflightTracker::new();
 
-    let lapsed = AuthorityClock::unclaimed();
-    lapsed.begin_session(Duration::from_millis(1), std::time::Instant::now());
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    heal_fence(&producers, &inflight, Some(&lapsed), 0).await;
-    match producers.produce(0, &test_person(1)).await {
-        Err(FencedProduceError::NotAcquired) => {}
-        other => panic!("a lapsed claim must not take a fence, got {other:?}"),
-    }
+    // The partition's real owner, holding a working fence.
+    let owner = Arc::new(fenced_producers(&topic));
+    owner.acquire(0).await.expect("the owner takes its fence");
+    owner
+        .produce(0, &test_person(1))
+        .await
+        .expect("the owner can write");
 
+    // A pod whose claim is gone tries to heal the same partition.
+    let zombie = Arc::new(fenced_producers(&topic));
+    let lapsed = AuthorityClock::unclaimed();
+    lapsed.begin_session(Duration::from_secs(30), std::time::Instant::now());
+    lapsed.surrender();
+    heal_fence(&zombie, &inflight, Some(&lapsed), 0).await;
+
+    owner
+        .produce(0, &test_person(2))
+        .await
+        .expect("a pod with no standing must not take the epoch from the real owner");
+}
+
+/// A partition a handoff is already moving belongs to the incoming
+/// owner, so healing must leave it alone for the same reason.
+#[tokio::test]
+async fn healing_skips_a_partition_under_handoff() {
+    let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
+    let inflight = InflightTracker::new();
+
+    let owner = Arc::new(fenced_producers(&topic));
+    owner.acquire(0).await.expect("the owner takes its fence");
+
+    let other = Arc::new(fenced_producers(&topic));
     let valid = AuthorityClock::unclaimed();
     valid.begin_session(Duration::from_secs(30), std::time::Instant::now());
     inflight.fence(0);
-    heal_fence(&producers, &inflight, Some(&valid), 0).await;
-    match producers.produce(0, &test_person(1)).await {
-        Err(FencedProduceError::NotAcquired) => {}
-        other => panic!("a partition being handed off is not ours to take, got {other:?}"),
-    }
+    heal_fence(&other, &inflight, Some(&valid), 0).await;
+
+    owner
+        .produce(0, &test_person(1))
+        .await
+        .expect("a partition being handed off is not ours to take");
 }
 
 /// Standing can lapse *during* the broker round trip, by which point the

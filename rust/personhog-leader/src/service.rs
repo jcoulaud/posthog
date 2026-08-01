@@ -1186,6 +1186,79 @@ mod tests {
         assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
+    /// `get_person` checks the claim twice, and asserting only on the
+    /// status code cannot tell the two apart: delete either and the other
+    /// still answers FailedPrecondition. This one pins the second.
+    ///
+    /// The load is what makes it distinct. A read that finds the person
+    /// in cache never waits, so the admission check is the only one it
+    /// can trip; a read that has to wait — on the per-key lock, or on a
+    /// changelog recovery — can be admitted under a claim that is gone by
+    /// the time there is an answer, and it is the answer, not the
+    /// arrival, that has to be backed by ownership.
+    #[tokio::test]
+    async fn a_read_admitted_before_the_lapse_still_refuses_to_answer() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_secs(30), Instant::now());
+        let service = Arc::new(PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        });
+        let (team_id, person_id) = (7, 42);
+        let cache_key = PersonCacheKey { team_id, person_id };
+        service.cache.create_partition(0);
+
+        // Hold the per-key lock. The read misses the cache, reaches for
+        // this lock, and parks there — which is where a changelog
+        // recovery would leave it.
+        let mutex = service
+            .locks
+            .entry(cache_key.clone())
+            .or_default()
+            .value()
+            .clone();
+        let held = mutex.lock().await;
+
+        let mut request = Request::new(GetPersonRequest {
+            team_id,
+            person_id,
+            read_options: None,
+        });
+        request
+            .metadata_mut()
+            .insert("x-partition", "0".parse().unwrap());
+        let reading = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.get_person(request).await }
+        });
+        tokio::task::yield_now().await;
+
+        // The claim goes while the read is parked, and the answer it was
+        // waiting for arrives at the same time.
+        clock.surrender();
+        service.cache.put(
+            0,
+            cache_key.clone(),
+            CachedPerson {
+                id: person_id,
+                uuid: "00000000-0000-0000-0000-000000000007".to_string(),
+                team_id,
+                properties: serde_json::json!({}),
+                created_at: 0,
+                version: 1,
+                is_identified: false,
+                approx_bytes: 64,
+            },
+        );
+        drop(held);
+
+        let err = reading
+            .await
+            .expect("the read task must not panic")
+            .expect_err("a claim that lapsed during the load must not be answered");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
     /// With the gate off the pod serves exactly as before, so the flag
     /// is a real off switch rather than a partial one.
     #[tokio::test]

@@ -3251,10 +3251,16 @@ async fn authority_lapses_when_renewals_stop() {
     proxy.set_blackholed(true);
     proxy.sever();
 
-    // Past the renewal margin, nothing confirms the lease any more.
+    // Past the renewal margin, nothing confirms the lease any more —
+    // and it has to lapse by *ageing out*, not by the session tearing
+    // down and surrendering. Both happen around the same time here, so
+    // asserting only `!is_valid()` would pass with the staleness
+    // comparison deleted entirely and the whole clock reduced to its
+    // surrender flag, which is the one thing a wedged keepalive cannot
+    // set.
     wait_for_condition(Duration::from_secs(15), POLL_INTERVAL, || {
         let authority = Arc::clone(&authority);
-        async move { !authority.is_valid() }
+        async move { !authority.is_valid() && !authority.is_surrendered() }
     })
     .await;
 
