@@ -3191,3 +3191,72 @@ async fn pod_retries_resume_after_a_failed_attempt() {
 
     cancel.cancel();
 }
+
+/// The authority clock is what the data plane reads to decide whether it
+/// may still answer as a partition's owner, so it has to lapse on the
+/// strength of missing renewals alone — no coordination task has to run
+/// for it to become invalid. This severs etcd and watches the claim
+/// expire while the process is otherwise perfectly healthy.
+#[tokio::test]
+async fn authority_lapses_when_renewals_stop() {
+    let proxy = FlakyProxy::start("127.0.0.1:2379").await;
+    let prefix = format!("/test-authority-lapse-{}/", uuid::Uuid::new_v4());
+    let pod_store = store_at(&proxy.endpoint, &prefix).await;
+
+    let cancel = CancellationToken::new();
+    let (handler, events) = MockHandoffHandler::new();
+    let authority = Arc::new(AuthorityClock::unclaimed());
+    // TTL 9 puts the renewal margin at 6s, so the lapse is observable
+    // well inside the test's patience.
+    let pod = personhog_coordination::pod::PodHandle::new(
+        Arc::clone(&pod_store),
+        personhog_coordination::pod::PodConfig {
+            pod_name: "lapse-pod".to_string(),
+            lease_ttl: 9,
+            heartbeat_interval: Duration::from_secs(1),
+            reconcile_interval: Duration::from_secs(86_400),
+            ..Default::default()
+        },
+        Arc::new(handler),
+        None,
+        Arc::clone(&authority),
+    );
+    let token = cancel.child_token();
+    tokio::spawn(async move { pod.run(token).await });
+
+    let store = store_at(ETCD_ENDPOINT, &prefix).await;
+    put_handoff(&store, 0, None, "lapse-pod", HandoffPhase::Warming).await;
+    wait_for_event(&events, HandoffEvent::Warmed(0)).await;
+    assert!(
+        authority.is_valid(),
+        "a registered pod renewing normally must hold authority"
+    );
+
+    // A reconnectable blip must not cost the pod its claim: the lease is
+    // alive in etcd and the keepalive rebuilds its stream. Waiting past
+    // the renewal margin (6s at this TTL) is what makes the assertion
+    // mean something — surviving it requires renewals to have been
+    // confirmed *and* published through the rebuilt stream, not merely
+    // the stamp taken when the session began.
+    proxy.sever();
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(
+        authority.is_valid(),
+        "authority must survive a blip the keepalive can ride out, on the strength of \
+         renewals published through the rebuilt stream"
+    );
+
+    // Now a real outage: new connections are refused too, so no renewal
+    // can be confirmed however hard the keepalive tries.
+    proxy.set_blackholed(true);
+    proxy.sever();
+
+    // Past the renewal margin, nothing confirms the lease any more.
+    wait_for_condition(Duration::from_secs(15), POLL_INTERVAL, || {
+        let authority = Arc::clone(&authority);
+        async move { !authority.is_valid() }
+    })
+    .await;
+
+    cancel.cancel();
+}
