@@ -374,7 +374,7 @@ impl FencedChangelogProducers {
     /// initialize transactions, which fences every previous owner of the
     /// partition's transactional id. Runs on the blocking pool — init is
     /// a synchronous broker round trip.
-    pub async fn acquire(&self, partition: u32) -> Result<(), String> {
+    async fn acquire_installed(&self, partition: u32) -> Result<Arc<PartitionFence>, String> {
         let kafka = self.kafka.clone();
         let tid = transactional_id(&self.topic, partition);
         let timeout = self.init_timeout;
@@ -391,24 +391,28 @@ impl FencedChangelogProducers {
         })?;
         counter!("personhog_leader_fence_init_total", "outcome" => "ok").increment(1);
         histogram!("personhog_leader_fence_init_ms").record(start.elapsed().as_secs_f64() * 1000.0);
-        self.partitions.insert(
-            partition,
-            Arc::new(PartitionFence {
-                producer,
-                gate: Mutex::new(Gate {
-                    open: false,
-                    in_flight: 0,
-                    poisoned: false,
-                    committing: false,
-                    waiters: Vec::new(),
-                }),
-                sends_settled: Notify::new(),
-                window_closed: Notify::new(),
-                unusable: AtomicBool::new(false),
-                commit_timeout: self.commit_timeout,
+        let installed = Arc::new(PartitionFence {
+            producer,
+            gate: Mutex::new(Gate {
+                open: false,
+                in_flight: 0,
+                poisoned: false,
+                committing: false,
+                waiters: Vec::new(),
             }),
-        );
-        Ok(())
+            sends_settled: Notify::new(),
+            window_closed: Notify::new(),
+            unusable: AtomicBool::new(false),
+            commit_timeout: self.commit_timeout,
+        });
+        self.partitions.insert(partition, Arc::clone(&installed));
+        Ok(installed)
+    }
+
+    /// Take the partition's fence, discarding the handle. The caller
+    /// relies on the map rather than on holding the fence itself.
+    pub async fn acquire(&self, partition: u32) -> Result<(), String> {
+        self.acquire_installed(partition).await.map(|_| ())
     }
 
     /// The fence currently installed for a partition, if any.
@@ -1011,11 +1015,14 @@ pub async fn heal_fence(
     if lost_standing || fenced.holds(partition) || inflight.is_fenced(partition) {
         return;
     }
-    if let Err(e) = fenced.acquire(partition).await {
-        counter!("personhog_leader_fence_heal_failures_total").increment(1);
-        error!(partition, error = %e, "failed to re-take the changelog fence");
-        return;
-    }
+    let taken = match fenced.acquire_installed(partition).await {
+        Ok(taken) => taken,
+        Err(e) => {
+            counter!("personhog_leader_fence_heal_failures_total").increment(1);
+            error!(partition, error = %e, "failed to re-take the changelog fence");
+            return;
+        }
+    };
     // The round trip is long enough for the ground to move: the claim can
     // lapse, or a handoff can start draining the partition. Holding a
     // fence taken without standing is not passive — the write path trusts
@@ -1024,13 +1031,10 @@ pub async fn heal_fence(
     // partition's real owner.
     let lost_standing = authority.is_some_and(|a| !a.is_valid());
     if lost_standing || inflight.is_fenced(partition) {
-        // By identity, not by partition: this ran across a broker round
-        // trip, and dropping whatever is installed now would evict a
-        // replacement rather than the fence this call took.
-        match fenced.installed(partition) {
-            Some(taken) => fenced.forget_fence(partition, &taken),
-            None => fenced.release(partition),
-        }
+        // The fence this call installed, not whatever is installed now:
+        // re-reading the map would match by construction and evict a
+        // replacement just as readily as its own.
+        fenced.forget_fence(partition, &taken);
         counter!("personhog_leader_fence_heal_abandoned_total").increment(1);
         warn!(
             partition,
