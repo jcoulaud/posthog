@@ -3306,3 +3306,60 @@ async fn authority_is_surrendered_when_the_registration_is_deleted() {
 
     cancel.cancel();
 }
+
+/// A deleted registration must put the pod back to work, not just stop
+/// it serving.
+///
+/// Surrendering alone would leave a pod holding a live lease, refusing
+/// every read, and never registering again — idle with nothing to
+/// escalate. Ending the session is what makes it re-register and take
+/// partitions back.
+#[tokio::test]
+async fn a_deleted_registration_starts_a_new_session() {
+    let prefix = format!("/test-registration-resession-{}/", uuid::Uuid::new_v4());
+    let store = store_at(ETCD_ENDPOINT, &prefix).await;
+
+    let cancel = CancellationToken::new();
+    let (handler, events) = MockHandoffHandler::new();
+    let authority = Arc::new(AuthorityClock::unclaimed());
+    let pod = personhog_coordination::pod::PodHandle::new(
+        Arc::clone(&store),
+        personhog_coordination::pod::PodConfig {
+            pod_name: "resession-pod".to_string(),
+            lease_ttl: 60,
+            // Long enough that the keepalive cannot be what notices.
+            heartbeat_interval: Duration::from_secs(20),
+            reconcile_interval: Duration::from_secs(86_400),
+            ..Default::default()
+        },
+        Arc::new(handler),
+        None,
+        Arc::clone(&authority),
+    );
+    let token = cancel.child_token();
+    tokio::spawn(async move { pod.run(token).await });
+
+    put_handoff(&store, 0, None, "resession-pod", HandoffPhase::Warming).await;
+    wait_for_event(&events, HandoffEvent::Warmed(0)).await;
+
+    revoke_lease_of_key(&format!("{prefix}pods/resession-pod")).await;
+
+    // The pod must come back: a fresh session re-registers and claims
+    // authority again.
+    let check = Arc::clone(&store);
+    wait_for_condition(Duration::from_secs(20), POLL_INTERVAL, || {
+        let store = Arc::clone(&check);
+        let authority = Arc::clone(&authority);
+        async move {
+            let registered = store
+                .list_pods()
+                .await
+                .map(|pods| pods.iter().any(|p| p.pod_name == "resession-pod"))
+                .unwrap_or(false);
+            registered && authority.is_valid()
+        }
+    })
+    .await;
+
+    cancel.cancel();
+}

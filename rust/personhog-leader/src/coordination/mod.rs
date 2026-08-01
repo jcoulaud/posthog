@@ -9,7 +9,7 @@ use personhog_coordination::pod::HandoffHandler;
 use tracing::{error, info};
 
 use crate::cache::{DirtyIndex, PartitionedCache};
-use crate::fencing::{FenceGuard, FencedChangelogProducers};
+use crate::fencing::{heal_fence, FenceGuard, FencedChangelogProducers};
 use crate::inflight::InflightTracker;
 use crate::warming::{warm_from_kafka, WarmClientPools, WarmingConfig};
 
@@ -216,6 +216,17 @@ impl HandoffHandler for LeaderHandoffHandler {
             guard.keep();
         }
         info!(partition, "partition warmed");
+        Ok(())
+    }
+
+    /// The partition is meant to be served, so make sure this pod can
+    /// actually write to it. A fence lost to a broker rejection or a
+    /// failed abort has no other way back — convergence sees the
+    /// partition warmed and unfenced and would otherwise do nothing.
+    async fn verify_serving(&self, partition: u32) -> Result<()> {
+        if let Some(fenced) = &self.fenced {
+            heal_fence(fenced, &self.inflight, self.authority.as_deref(), partition).await;
+        }
         Ok(())
     }
 

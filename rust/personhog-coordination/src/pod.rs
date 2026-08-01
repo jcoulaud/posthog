@@ -128,6 +128,23 @@ pub trait HandoffHandler: Send + Sync {
     /// released: the pod only tracks a warm once this returns.
     async fn warm_partition(&self, partition: u32) -> Result<()>;
 
+    /// Owner: confirm this pod still holds whatever a partition needs in
+    /// order to serve it, and re-take anything missing.
+    ///
+    /// Called on every convergence to `Serving`, including reconcile
+    /// ticks, so it is the repair path for state the handoff protocol has
+    /// no way back from — the leader uses it to re-take a changelog fence
+    /// evicted by a broker rejection or lost to a failed abort. Running
+    /// under `Serving` is what makes it safe: the pod re-takes only what
+    /// the durable assignment says it owns, rather than what its local
+    /// caches happen to still hold.
+    ///
+    /// Idempotent and cheap when nothing is missing, since it runs
+    /// per-partition on every tick.
+    async fn verify_serving(&self, _partition: u32) -> Result<()> {
+        Ok(())
+    }
+
     /// Old owner: release the partition from this pod's local state (drop cache,
     /// close consumers, etc.).
     ///
@@ -373,18 +390,24 @@ impl PodHandle {
             // Deliberately best-effort: it accelerates detection, it does
             // not own it. If the stream never establishes or dies, the
             // keepalive's margin remains the guarantee, exactly as before.
+            let heartbeat_cancel = CancellationToken::new();
             let registration_cancel = CancellationToken::new();
             let registration_watch = {
                 let store = Arc::clone(&self.store);
                 let authority = Arc::clone(&self.authority);
                 let pod_name = self.config.pod_name.clone();
                 let token = registration_cancel.child_token();
+                // Ending the session is the keepalive's job, so the watch
+                // ends it the same way rather than inventing a second
+                // path: stopping the heartbeat makes the attempt loop
+                // take the lease-loss branch it already has, which
+                // fences, releases, and registers anew.
+                let end_session = heartbeat_cancel.clone();
                 tokio::spawn(async move {
-                    watch_own_registration(store, pod_name, authority, token).await;
+                    watch_own_registration(store, pod_name, authority, end_session, token).await;
                 })
             };
 
-            let heartbeat_cancel = CancellationToken::new();
             let mut heartbeat_handle = {
                 let store = Arc::clone(&self.store);
                 let interval = self.config.heartbeat_interval;
@@ -973,6 +996,10 @@ impl PodHandle {
                 // admission depend on an undocumented handler side
                 // effect. Resuming after a warm that already unfenced is
                 // an idempotent no-op.
+                // Whatever the branch above did, the pod is meant to be
+                // serving this partition now — so let the handler repair
+                // anything it needs and no longer has.
+                self.handler.verify_serving(partition).await?;
                 // Clear the local record only once the handler has
                 // actually resumed: `resume_partition` can fail (it may
                 // re-take broker-side state), and forgetting the fence
@@ -1360,6 +1387,7 @@ async fn watch_own_registration(
     store: Arc<PersonhogStore>,
     pod_name: String,
     authority: Arc<AuthorityClock>,
+    end_session: CancellationToken,
     cancel: CancellationToken,
 ) {
     let revision = match store.current_revision().await {
@@ -1397,6 +1425,11 @@ async fn watch_own_registration(
                     "registration deleted; surrendering serving authority immediately"
                 );
                 authority.surrender();
+                // Surrendering alone would leave a pod that holds a live
+                // lease, refuses every read, and never registers again —
+                // silently idle with nothing to escalate. Ending the
+                // session is what puts it back to work.
+                end_session.cancel();
                 return;
             }
         }

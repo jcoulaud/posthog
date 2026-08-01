@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use personhog_coordination::authority::AuthorityClock;
-use personhog_leader::cache::PartitionedCache;
 use personhog_leader::fencing::{
-    heal_missing_fences, FenceGuard, FencedChangelogProducers, FencedProduceError,
+    heal_fence, FenceGuard, FencedChangelogProducers, FencedProduceError,
 };
 use personhog_leader::inflight::InflightTracker;
 use personhog_proto::personhog::types::v1::Person;
@@ -288,80 +287,67 @@ async fn a_completed_warm_keeps_its_fence() {
         .expect("a completed warm keeps a usable fence");
 }
 
-/// A partition can end up served without a fence — a produce found the
-/// producer fenced and evicted it, an abort exhausted its retries, a
-/// stale pod took the epoch and stepped back. Convergence sees such a
-/// partition warmed and unfenced and does nothing, so healing is what
-/// gets it writable again before the next handoff.
+/// A partition can end up served without a fence — a broker rejection
+/// evicted it, an abort exhausted its retries, a stale pod took the
+/// epoch and stepped back. Convergence sees such a partition warmed and
+/// unfenced and does nothing, so this is what gets it writable again
+/// before the next handoff.
 #[tokio::test]
 async fn healing_retakes_a_fence_for_a_served_partition() {
     let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
     let producers = Arc::new(fenced_producers(&topic));
-    let cache = PartitionedCache::new(1 << 20);
     let inflight = InflightTracker::new();
     let clock = AuthorityClock::unclaimed();
     clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
 
-    // Serving the partition, but the fence is gone.
-    cache.create_partition(0);
-    assert!(!producers.holds(0));
-
-    heal_missing_fences(&producers, &cache, &inflight, Some(&clock)).await;
-    assert!(
-        producers.holds(0),
-        "a served partition must regain its fence"
-    );
+    heal_fence(&producers, &inflight, Some(&clock), 0).await;
 
     producers
         .produce(0, &test_person(1))
         .await
-        .expect("and must be writable again");
+        .expect("a served partition must regain a usable fence");
 }
 
 /// Healing takes the partition's epoch from whoever holds it, so a pod
-/// that cannot vouch for its own claim must not do it — that is exactly
-/// how a waking zombie takes a partition from its real owner. Nor may it
-/// heal a partition a handoff is moving.
+/// that cannot vouch for its own claim must not do it — that is how a
+/// waking zombie takes a partition from its real owner. Nor may it heal
+/// a partition a handoff is moving.
 #[tokio::test]
 async fn healing_refuses_without_standing() {
     let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
     let producers = Arc::new(fenced_producers(&topic));
-    let cache = PartitionedCache::new(1 << 20);
     let inflight = InflightTracker::new();
-    cache.create_partition(0);
 
     let lapsed = AuthorityClock::unclaimed();
     lapsed.begin_session(Duration::from_millis(1), std::time::Instant::now());
     tokio::time::sleep(Duration::from_millis(20)).await;
-    heal_missing_fences(&producers, &cache, &inflight, Some(&lapsed)).await;
-    assert!(!producers.holds(0), "a lapsed claim must not take a fence");
+    heal_fence(&producers, &inflight, Some(&lapsed), 0).await;
+    match producers.produce(0, &test_person(1)).await {
+        Err(FencedProduceError::NotAcquired) => {}
+        other => panic!("a lapsed claim must not take a fence, got {other:?}"),
+    }
 
     let valid = AuthorityClock::unclaimed();
     valid.begin_session(Duration::from_secs(30), std::time::Instant::now());
     inflight.fence(0);
-    heal_missing_fences(&producers, &cache, &inflight, Some(&valid)).await;
-    assert!(
-        !producers.holds(0),
-        "a partition being handed off belongs to the incoming owner"
-    );
+    heal_fence(&producers, &inflight, Some(&valid), 0).await;
+    match producers.produce(0, &test_person(1)).await {
+        Err(FencedProduceError::NotAcquired) => {}
+        other => panic!("a partition being handed off is not ours to take, got {other:?}"),
+    }
 }
 
-/// Standing can lapse *during* the broker round trip, and the fence is
-/// installed by then. Keeping it is not passive: the write path trusts
+/// Standing can lapse *during* the broker round trip, by which point the
+/// fence is installed. Keeping it is not passive: the write path trusts
 /// the broker epoch rather than re-checking the claim, so a request
-/// landing on this pod would ack a mutation with an epoch taken from the
-/// partition's real owner. Whatever was taken has to be given back.
+/// landing here would ack a mutation with an epoch taken from the
+/// partition's real owner.
 #[tokio::test]
 async fn healing_gives_back_a_fence_it_lost_standing_for() {
     let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
     let producers = Arc::new(fenced_producers(&topic));
-    let cache = PartitionedCache::new(1 << 20);
     let inflight = InflightTracker::new();
-    cache.create_partition(0);
 
-    // Valid at the pre-check and lost while the acquire is in flight —
-    // a margin small enough to lapse on its own would fail the pre-check
-    // instead, and never reach the case under test.
     let clock = Arc::new(AuthorityClock::unclaimed());
     clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
     let losing = Arc::clone(&clock);
@@ -370,40 +356,11 @@ async fn healing_gives_back_a_fence_it_lost_standing_for() {
         losing.surrender();
     });
 
-    heal_missing_fences(&producers, &cache, &inflight, Some(&clock)).await;
+    heal_fence(&producers, &inflight, Some(&clock), 0).await;
     lease_loss.await.unwrap();
-    assert!(
-        !producers.holds(0),
-        "a fence taken without standing must not be retained"
-    );
-}
 
-/// The same applies to a handoff starting mid-acquire: the partition is
-/// being moved, and the incoming owner's fence is the one that should
-/// stand.
-#[tokio::test]
-async fn healing_gives_back_a_fence_when_a_handoff_starts() {
-    let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
-    let producers = Arc::new(fenced_producers(&topic));
-    let cache = PartitionedCache::new(1 << 20);
-    let inflight = Arc::new(InflightTracker::new());
-    cache.create_partition(0);
-
-    let clock = AuthorityClock::unclaimed();
-    clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
-
-    // Fence the partition while the acquire is in flight.
-    let fencer = Arc::clone(&inflight);
-    let handoff = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        fencer.fence(0);
-    });
-
-    heal_missing_fences(&producers, &cache, &inflight, Some(&clock)).await;
-    handoff.await.unwrap();
-
-    assert!(
-        !producers.holds(0),
-        "a partition a handoff is moving belongs to the incoming owner"
-    );
+    match producers.produce(0, &test_person(1)).await {
+        Err(FencedProduceError::NotAcquired) => {}
+        other => panic!("a fence taken without standing must be given back, got {other:?}"),
+    }
 }

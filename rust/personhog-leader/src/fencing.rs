@@ -44,7 +44,6 @@ use personhog_proto::personhog::types::v1::Person;
 
 use personhog_coordination::authority::AuthorityClock;
 
-use crate::cache::PartitionedCache;
 use crate::inflight::InflightTracker;
 use crate::kafka::changelog_message_key;
 
@@ -719,73 +718,57 @@ fn clone_outcome(outcome: &Result<(), FencedProduceError>) -> Result<(), FencedP
     }
 }
 
-/// Re-take fences for partitions this pod serves but no longer holds one
-/// for.
+/// Re-take the partition's fence if this pod is serving it without one.
 ///
 /// A fence can go missing under a pod that legitimately owns its
-/// partition: the broker rejected a produce and the fence was evicted, an
-/// abort exhausted its retries and left the producer unusable, or a stale
-/// pod took the epoch and backed out on noticing. Nothing in the handoff
-/// protocol repairs that — convergence sees the partition warmed and
-/// unfenced and does nothing — so the partition would stay unwritable
-/// until the next handoff moved it.
+/// partition: a broker rejection evicted it, an abort exhausted its
+/// retries and left the producer unusable, or a stale pod took the epoch
+/// and stepped back. Nothing in the handoff protocol repairs that —
+/// convergence sees the partition warmed and unfenced and does nothing —
+/// so without this the partition stays unwritable until a handoff moves
+/// it.
 ///
-/// Re-acquisition is only safe because it is gated on lease validity.
-/// Taking a fence moves the broker's epoch away from whoever holds it, so
-/// a pod that cannot vouch for its own claim must not heal: that is
-/// precisely how a waking zombie takes a partition from its real owner.
-/// A partition being locally fenced is likewise disqualifying — it means
-/// a handoff is moving it, and the incoming owner's fence is the one that
-/// should stand.
-pub async fn heal_missing_fences(
+/// Re-acquisition is safe only because of where this is called from and
+/// what it checks. The caller is the convergence to `Serving`, so the
+/// durable assignment says this pod owns the partition; the claim must
+/// still be valid, because taking a fence moves the broker's epoch away
+/// from whoever holds it; and a partition being locally fenced is
+/// disqualifying, since that means a handoff is moving it and the
+/// incoming owner's fence is the one that should stand.
+pub async fn heal_fence(
     fenced: &FencedChangelogProducers,
-    cache: &PartitionedCache,
     inflight: &InflightTracker,
     authority: Option<&AuthorityClock>,
+    partition: u32,
 ) {
-    if authority.is_some_and(|a| !a.is_valid()) {
+    let lost_standing = authority.is_some_and(|a| !a.is_valid());
+    if lost_standing || fenced.holds(partition) || inflight.is_fenced(partition) {
         return;
     }
-    for partition in cache.owned_partitions() {
-        if fenced.holds(partition) || inflight.is_fenced(partition) {
-            continue;
-        }
-        match fenced.acquire(partition).await {
-            Ok(()) => {
-                // The round trip is long enough for the ground to move
-                // under this decision: the claim can lapse, or a handoff
-                // can start draining the partition. Either way the fence
-                // just taken is not ours to hold, and holding it is not
-                // passive — the write path trusts the broker epoch
-                // rather than re-checking the claim, so a request landing
-                // here would ack a mutation using an epoch taken from the
-                // partition's real owner, after that owner may already
-                // have warmed.
-                let lost_standing = authority.is_some_and(|a| !a.is_valid());
-                if lost_standing || inflight.is_fenced(partition) {
-                    fenced.release(partition);
-                    counter!("personhog_leader_fence_heal_abandoned_total").increment(1);
-                    warn!(
-                        partition,
-                        "released a fence taken while standing lapsed mid-acquire"
-                    );
-                    return;
-                }
-                counter!("personhog_leader_fence_healed_total").increment(1);
-                warn!(
-                    partition,
-                    "re-took the changelog fence for a served partition"
-                );
-            }
-            Err(e) => {
-                // No fence is installed on failure, so there is nothing
-                // to give back.
-                counter!("personhog_leader_fence_heal_failures_total").increment(1);
-                error!(partition, error = %e, "failed to re-take the changelog fence");
-                if authority.is_some_and(|a| !a.is_valid()) {
-                    return;
-                }
-            }
-        }
+    if let Err(e) = fenced.acquire(partition).await {
+        counter!("personhog_leader_fence_heal_failures_total").increment(1);
+        error!(partition, error = %e, "failed to re-take the changelog fence");
+        return;
     }
+    // The round trip is long enough for the ground to move: the claim can
+    // lapse, or a handoff can start draining the partition. Holding a
+    // fence taken without standing is not passive — the write path trusts
+    // the broker epoch rather than re-checking the claim, so a request
+    // landing here would ack a mutation with an epoch taken from the
+    // partition's real owner.
+    let lost_standing = authority.is_some_and(|a| !a.is_valid());
+    if lost_standing || inflight.is_fenced(partition) {
+        fenced.release(partition);
+        counter!("personhog_leader_fence_heal_abandoned_total").increment(1);
+        warn!(
+            partition,
+            "released a fence taken while standing lapsed mid-acquire"
+        );
+        return;
+    }
+    counter!("personhog_leader_fence_healed_total").increment(1);
+    warn!(
+        partition,
+        "re-took the changelog fence for a served partition"
+    );
 }
