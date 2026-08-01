@@ -6,7 +6,7 @@ use metrics::counter;
 use personhog_coordination::authority::AuthorityClock;
 use personhog_coordination::error::{Error, Result};
 use personhog_coordination::pod::HandoffHandler;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::cache::{DirtyIndex, PartitionedCache};
 use crate::fencing::FencedChangelogProducers;
@@ -97,6 +97,37 @@ impl LeaderHandoffHandler {
     /// takes the partition away from the owner that legitimately holds
     /// it. Failing here leaves the convergence to retry once the lease
     /// is confirmed again, or to end with the session if it is not.
+    /// Re-check after a broker round trip that moved the partition's
+    /// epoch.
+    ///
+    /// `check_authority` before `acquire` is a pre-check across an
+    /// operation that talks to the broker, so the claim can lapse while
+    /// it runs. The epoch bump cannot be undone — `init_transactions`
+    /// has already taken it from whoever held it — but this pod can
+    /// decline to build on a claim it no longer has: it drops the fence
+    /// and fails the convergence rather than serving. The partition's
+    /// real owner re-takes the epoch through its own healing
+    /// re-acquisition, so a fence stolen this way corrects itself
+    /// instead of persisting until the next handoff.
+    fn check_authority_after_acquire(&self, partition: u32, phase: &'static str) -> Result<()> {
+        let Err(e) = self.check_authority(partition, phase) else {
+            return Ok(());
+        };
+        if let Some(fenced) = &self.fenced {
+            fenced.release(partition);
+        }
+        counter!(
+            "personhog_leader_authority_lapsed_mid_acquire_total",
+            "phase" => phase
+        )
+        .increment(1);
+        error!(
+            partition,
+            phase, "authority lapsed while taking the changelog fence; dropping it"
+        );
+        Err(e)
+    }
+
     fn check_authority(&self, partition: u32, phase: &'static str) -> Result<()> {
         let Some(authority) = &self.authority else {
             return Ok(());
@@ -156,6 +187,7 @@ impl HandoffHandler for LeaderHandoffHandler {
                 .acquire(partition)
                 .await
                 .map_err(Error::invalid_state)?;
+            self.check_authority_after_acquire(partition, "warm")?;
             info!(partition, "changelog fence acquired");
         }
         warm_from_kafka(
@@ -202,6 +234,7 @@ impl HandoffHandler for LeaderHandoffHandler {
                 .acquire(partition)
                 .await
                 .map_err(Error::invalid_state)?;
+            self.check_authority_after_acquire(partition, "resume")?;
             info!(partition, "changelog fence re-acquired on resume");
         }
         self.inflight.unfence(partition);

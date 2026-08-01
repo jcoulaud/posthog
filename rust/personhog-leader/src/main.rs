@@ -372,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         },
         Arc::clone(&warm_pools),
-        fenced,
+        fenced.clone(),
         gated_authority.clone(),
     );
     let advertise_address =
@@ -483,6 +483,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(config.warm_committed_offsets_timeout_secs),
         Duration::from_secs(config.dirty_index_prune_interval_secs.max(1)),
     ));
+
+    // Repair fences the protocol has no path back from — a produce that
+    // found the producer fenced, an abort that exhausted its retries, a
+    // stale pod that took the epoch and stepped back. Convergence sees
+    // such a partition warmed and unfenced and does nothing, so without
+    // this it stays unwritable until a handoff moves it.
+    if let Some(fenced) = fenced.clone() {
+        let cache = Arc::clone(&cache);
+        let inflight = Arc::clone(&inflight);
+        let authority = Arc::clone(&authority);
+        let interval = Duration::from_secs(config.dirty_index_prune_interval_secs.max(1));
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                personhog_leader::fencing::heal_missing_fences(
+                    &fenced,
+                    &cache,
+                    &inflight,
+                    Some(&authority),
+                )
+                .await;
+            }
+        });
+    }
 
     // gRPC server. Mirrors the replica's middleware stack so the router's
     // per-backend metrics (processing time, transport/network overhead) and

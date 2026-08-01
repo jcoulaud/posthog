@@ -42,6 +42,10 @@ use tracing::{error, warn};
 
 use personhog_proto::personhog::types::v1::Person;
 
+use personhog_coordination::authority::AuthorityClock;
+
+use crate::cache::PartitionedCache;
+use crate::inflight::InflightTracker;
 use crate::kafka::changelog_message_key;
 
 /// The fencing scope is the partition: every owner of partition `p`
@@ -266,6 +270,11 @@ impl FencedChangelogProducers {
     /// survives; only a future owner's init advances it.
     pub fn release(&self, partition: u32) {
         self.partitions.remove(&partition);
+    }
+
+    /// Whether a fence is installed for the partition.
+    pub fn holds(&self, partition: u32) -> bool {
+        self.partitions.contains_key(&partition)
     }
 
     /// Produce one changelog record inside the partition's current
@@ -720,5 +729,58 @@ fn clone_outcome(outcome: &Result<(), FencedProduceError>) -> Result<(), FencedP
         Err(FencedProduceError::NotAcquired) => Err(FencedProduceError::NotAcquired),
         Err(FencedProduceError::Fenced) => Err(FencedProduceError::Fenced),
         Err(FencedProduceError::Failed(e)) => Err(FencedProduceError::Failed(e.clone())),
+    }
+}
+
+/// Re-take fences for partitions this pod serves but no longer holds one
+/// for.
+///
+/// A fence can go missing under a pod that legitimately owns its
+/// partition: the broker rejected a produce and the fence was evicted, an
+/// abort exhausted its retries and left the producer unusable, or a stale
+/// pod took the epoch and backed out on noticing. Nothing in the handoff
+/// protocol repairs that — convergence sees the partition warmed and
+/// unfenced and does nothing — so the partition would stay unwritable
+/// until the next handoff moved it.
+///
+/// Re-acquisition is only safe because it is gated on lease validity.
+/// Taking a fence moves the broker's epoch away from whoever holds it, so
+/// a pod that cannot vouch for its own claim must not heal: that is
+/// precisely how a waking zombie takes a partition from its real owner.
+/// A partition being locally fenced is likewise disqualifying — it means
+/// a handoff is moving it, and the incoming owner's fence is the one that
+/// should stand.
+pub async fn heal_missing_fences(
+    fenced: &FencedChangelogProducers,
+    cache: &PartitionedCache,
+    inflight: &InflightTracker,
+    authority: Option<&AuthorityClock>,
+) {
+    if authority.is_some_and(|a| !a.is_valid()) {
+        return;
+    }
+    for partition in cache.owned_partitions() {
+        if fenced.holds(partition) || inflight.is_fenced(partition) {
+            continue;
+        }
+        match fenced.acquire(partition).await {
+            Ok(()) => {
+                counter!("personhog_leader_fence_healed_total").increment(1);
+                warn!(
+                    partition,
+                    "re-took the changelog fence for a served partition"
+                );
+            }
+            Err(e) => {
+                counter!("personhog_leader_fence_heal_failures_total").increment(1);
+                error!(partition, error = %e, "failed to re-take the changelog fence");
+            }
+        }
+        // Whatever the outcome, the claim may have lapsed during the
+        // round trip; healing further partitions on a stale claim is the
+        // theft this gate exists to prevent.
+        if authority.is_some_and(|a| !a.is_valid()) {
+            return;
+        }
     }
 }

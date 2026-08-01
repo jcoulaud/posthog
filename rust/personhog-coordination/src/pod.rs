@@ -362,6 +362,28 @@ impl PodHandle {
                 granted_at,
             );
 
+            // The keepalive learns of a revoked lease on its next round,
+            // which is up to a heartbeat away — and in that window the
+            // coordinator has already seen the deletion and can reassign,
+            // warm a successor, and let it start accepting writes while
+            // this pod still answers reads from a cache that is no longer
+            // the truth. Watching our own registration collapses that
+            // window to a watch delivery.
+            //
+            // Deliberately best-effort: it accelerates detection, it does
+            // not own it. If the stream never establishes or dies, the
+            // keepalive's margin remains the guarantee, exactly as before.
+            let registration_cancel = CancellationToken::new();
+            let registration_watch = {
+                let store = Arc::clone(&self.store);
+                let authority = Arc::clone(&self.authority);
+                let pod_name = self.config.pod_name.clone();
+                let token = registration_cancel.child_token();
+                tokio::spawn(async move {
+                    watch_own_registration(store, pod_name, authority, token).await;
+                })
+            };
+
             let heartbeat_cancel = CancellationToken::new();
             let mut heartbeat_handle = {
                 let store = Arc::clone(&self.store);
@@ -519,6 +541,8 @@ impl PodHandle {
                 // the coordinator, seeing a live owner, reassigns
                 // nothing.
                 self.authority.surrender();
+                registration_cancel.cancel();
+                drop(registration_watch.await);
                 heartbeat_cancel.cancel();
                 drop(heartbeat_handle.await);
                 drop(self.store.revoke_lease(lease_id).await);
@@ -540,6 +564,8 @@ impl PodHandle {
                 // fact that must not be undone by a renewal racing in
                 // behind us, which is why this latches.
                 self.authority.surrender();
+                registration_cancel.cancel();
+                drop(registration_watch.await);
                 let runway = Duration::from_secs(self.config.lease_ttl.max(0) as u64) / 3;
                 if let Err(e) = self
                     .self_fence_locally(runway.min(self.config.drain_timeout))
@@ -1317,6 +1343,64 @@ impl PodHandle {
 enum Trigger {
     Event,
     Reconcile,
+}
+
+/// Surrender the moment this pod's own registration disappears.
+///
+/// A lease revoked or expired out from under a pod deletes its keys
+/// immediately, but the pod only learns on its next keepalive round.
+/// The coordinator sees the deletion at once and can reassign inside
+/// that gap, so the pod can be answering reads from a cache the new
+/// owner is already changing. This closes the gap to a watch delivery.
+///
+/// It is an accelerator, not the guarantee: a stream that never
+/// establishes, or dies, simply leaves detection to the keepalive margin
+/// as before, which is why nothing here retries or escalates.
+async fn watch_own_registration(
+    store: Arc<PersonhogStore>,
+    pod_name: String,
+    authority: Arc<AuthorityClock>,
+    cancel: CancellationToken,
+) {
+    let revision = match store.current_revision().await {
+        Ok(revision) => revision,
+        Err(e) => {
+            tracing::warn!(pod = %pod_name, error = %e, "registration watch unavailable");
+            return;
+        }
+    };
+    let mut stream = match store.watch_pods_from(revision + 1).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::warn!(pod = %pod_name, error = %e, "registration watch unavailable");
+            return;
+        }
+    };
+    loop {
+        let message = tokio::select! {
+            _ = cancel.cancelled() => return,
+            message = stream.message() => message,
+        };
+        let Ok(Some(response)) = message else { return };
+        for event in response.events() {
+            if event.event_type() != EventType::Delete {
+                continue;
+            }
+            let deleted_us = event
+                .kv()
+                .and_then(|kv| from_utf8(kv.key()).ok())
+                .is_some_and(|key| key.rsplit('/').next() == Some(pod_name.as_str()));
+            if deleted_us {
+                counter!("personhog_coordination_registration_deleted_total").increment(1);
+                tracing::error!(
+                    pod = %pod_name,
+                    "registration deleted; surrendering serving authority immediately"
+                );
+                authority.surrender();
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

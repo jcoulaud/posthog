@@ -3260,3 +3260,49 @@ async fn authority_lapses_when_renewals_stop() {
 
     cancel.cancel();
 }
+
+/// A lease revoked out from under a pod deletes its registration at once,
+/// but the keepalive only learns on its next round — and the coordinator,
+/// which sees the deletion immediately, can reassign inside that gap. The
+/// pod must stop claiming ownership on the deletion, not a heartbeat
+/// later.
+#[tokio::test]
+async fn authority_is_surrendered_when_the_registration_is_deleted() {
+    let prefix = format!("/test-registration-delete-{}/", uuid::Uuid::new_v4());
+    let store = store_at(ETCD_ENDPOINT, &prefix).await;
+
+    let cancel = CancellationToken::new();
+    let (handler, events) = MockHandoffHandler::new();
+    let authority = Arc::new(AuthorityClock::unclaimed());
+    // A long heartbeat is the point: without the watch, nothing would
+    // notice for this long, and the test would time out.
+    let pod = personhog_coordination::pod::PodHandle::new(
+        Arc::clone(&store),
+        personhog_coordination::pod::PodConfig {
+            pod_name: "revoked-pod".to_string(),
+            lease_ttl: 60,
+            heartbeat_interval: Duration::from_secs(20),
+            reconcile_interval: Duration::from_secs(86_400),
+            ..Default::default()
+        },
+        Arc::new(handler),
+        None,
+        Arc::clone(&authority),
+    );
+    let token = cancel.child_token();
+    tokio::spawn(async move { pod.run(token).await });
+
+    put_handoff(&store, 0, None, "revoked-pod", HandoffPhase::Warming).await;
+    wait_for_event(&events, HandoffEvent::Warmed(0)).await;
+    assert!(authority.is_valid(), "a registered pod holds authority");
+
+    revoke_lease_of_key(&format!("{prefix}pods/revoked-pod")).await;
+
+    wait_for_condition(Duration::from_secs(10), POLL_INTERVAL, || {
+        let authority = Arc::clone(&authority);
+        async move { !authority.is_valid() }
+    })
+    .await;
+
+    cancel.cancel();
+}
