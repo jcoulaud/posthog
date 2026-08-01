@@ -27,7 +27,7 @@
 
 use std::time::Instant;
 
-use personhog_stateright::model::{HandoffModel, Variant, WarmOrder};
+use personhog_stateright::model::{ClaimDetection, HandoffModel, Variant, WarmOrder};
 use stateright::{Checker, Model};
 
 /// Every checker explores in parallel: stateright defaults to a single
@@ -51,6 +51,7 @@ fn base() -> HandoffModel {
         variant: Variant::Current,
         warm_order: WarmOrder::FenceFirst,
         lease_gated_reads: false,
+        claim_detection: ClaimDetection::Prompt,
         writes: 2,
         reads: 1,
         crashes: 0,
@@ -836,4 +837,41 @@ fn a_lease_gated_fleet_is_safe_and_live() {
     .spawn_bfs()
     .join()
     .assert_properties();
+}
+
+/// What the registration watch buys, as a verdict rather than prose.
+///
+/// A revoked lease deletes a pod's registration at once, but a pod that
+/// only learns on its next keepalive round keeps claiming the partition
+/// meanwhile — and the coordinator, which saw the deletion immediately,
+/// can reassign inside that window. With detection delayed, the read
+/// gate does not close the stale-read half at all; with the watch, it
+/// does.
+#[test]
+fn prompt_detection_is_what_makes_the_read_gate_hold() {
+    let stale_reads = |detection| {
+        HandoffModel {
+            variant: Variant::EpochFenced,
+            lease_gated_reads: true,
+            claim_detection: detection,
+            crashes: 2,
+            zombie_window: 1,
+            ..base()
+        }
+        .checker()
+        .threads(parallelism())
+        .spawn_bfs()
+        .join()
+        .discovery("strong_reads_complete")
+        .is_some()
+    };
+
+    assert!(
+        stale_reads(ClaimDetection::Delayed),
+        "a claim outliving its lease must still leave stale reads reachable"
+    );
+    assert!(
+        !stale_reads(ClaimDetection::Prompt),
+        "dropping the claim with the registration must close them"
+    );
 }

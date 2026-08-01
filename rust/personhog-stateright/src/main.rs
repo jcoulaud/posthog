@@ -11,7 +11,7 @@
 
 use clap::{Parser, ValueEnum};
 
-use personhog_stateright::model::{HandoffModel, Variant, WarmOrder};
+use personhog_stateright::model::{ClaimDetection, HandoffModel, Variant, WarmOrder};
 use stateright::Model;
 
 #[derive(Parser)]
@@ -50,6 +50,7 @@ fn main() {
         variant,
         warm_order,
         lease_gated_reads: false,
+        claim_detection: ClaimDetection::Prompt,
         writes: 2,
         reads: 1,
         crashes,
