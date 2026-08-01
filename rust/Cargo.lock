@@ -8473,6 +8473,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "metrics",
+ "personhog-coordination",
  "serde",
  "serde_json",
  "serial_test",

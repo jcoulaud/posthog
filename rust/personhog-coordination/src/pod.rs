@@ -919,6 +919,14 @@ impl PodHandle {
                     tracing::info!(pod, partition, "converging to Drained: fencing + draining");
                     did_work = true;
                 }
+                // Record the fence before the call that applies it. The
+                // handler fences as its first action and only then waits,
+                // so a failure after that point would otherwise leave the
+                // data plane fenced with nothing here to say so — and a
+                // later convergence to Serving, seeing no fence recorded,
+                // would skip the resume that lifts it. Recording early
+                // only risks a redundant resume, which is a no-op.
+                self.fenced_partitions.lock().await.insert(partition);
                 let start = Instant::now();
                 self.handler.drain_partition_inflight(partition).await?;
                 if newly_fencing {
@@ -928,7 +936,6 @@ impl PodHandle {
                     histogram!("personhog_coordination_partition_drain_ms")
                         .record(start.elapsed().as_secs_f64() * 1000.0);
                 }
-                self.fenced_partitions.lock().await.insert(partition);
                 if ack {
                     let handoff = handoff.expect("Drained state only derives from a handoff");
                     self.store
@@ -960,19 +967,14 @@ impl PodHandle {
                     },
                 );
                 if !valid {
-                    if self
-                        .warmed_partitions
-                        .lock()
-                        .await
-                        .remove(&partition)
-                        .is_some()
-                    {
+                    if self.warmed_partitions.lock().await.contains_key(&partition) {
                         tracing::info!(
                             pod,
                             partition,
                             "converging to Acquiring: releasing a warm from an earlier era"
                         );
                         self.handler.release_partition(partition).await?;
+                        self.warmed_partitions.lock().await.remove(&partition);
                     }
                     tracing::info!(pod, partition, "converging to Acquiring: warming");
                     let _warm_slot = self.acquire_warm_slot().await?;
@@ -986,6 +988,9 @@ impl PodHandle {
                     );
                     did_work = true;
                 }
+                // The warm above re-admits writes for this partition as
+                // part of taking ownership, so clearing the record here
+                // matches the data plane rather than diverging from it.
                 self.fenced_partitions.lock().await.remove(&partition);
                 self.store
                     .put_warmed_ack(&PodWarmedAck {
@@ -999,16 +1004,18 @@ impl PodHandle {
                 tracing::info!(pod, partition, "warmed ack written");
             }
             DesiredState::Released => {
-                let was_warmed = self
-                    .warmed_partitions
-                    .lock()
-                    .await
-                    .remove(&partition)
-                    .is_some();
-                let was_fenced = self.fenced_partitions.lock().await.remove(&partition);
+                // Forget the partition only once the handler has released
+                // it. Clearing first and failing would leave the cache
+                // still serving a partition this pod no longer records as
+                // held — invisible to the local fence, and to anything
+                // else that reasons from these sets.
+                let was_warmed = self.warmed_partitions.lock().await.contains_key(&partition);
+                let was_fenced = self.fenced_partitions.lock().await.contains(&partition);
                 if was_warmed || was_fenced {
                     tracing::info!(pod, partition, "converging to Released: releasing");
                     self.handler.release_partition(partition).await?;
+                    self.warmed_partitions.lock().await.remove(&partition);
+                    self.fenced_partitions.lock().await.remove(&partition);
                     counter!("personhog_coordination_partition_releases_total").increment(1);
                     self.drain_notify.notify_one();
                     did_work = true;
@@ -1336,6 +1343,19 @@ mod tests {
                 Some(assignment(OTHER)),
                 Some(handoff(Some(POD), OTHER, Complete)),
                 Released,
+            ),
+            (
+                // A cancelled handoff is replaced by a reaffirm toward
+                // the current owner, and the coordinator deliberately
+                // leaves `old_owner` unset on it: naming this pod on
+                // both sides would match the old-owner arm first and
+                // release the partition instead of resuming it. That is
+                // a silent partition drop, so the shape is pinned here
+                // rather than left to a comment.
+                "reaffirmed owner resumes rather than releasing",
+                Some(assignment(POD)),
+                Some(handoff(None, POD, Complete)),
+                Serving,
             ),
             (
                 "new owner must not hold the partition in Freezing",

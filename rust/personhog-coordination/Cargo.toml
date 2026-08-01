@@ -19,7 +19,15 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# Exposes the store operations that bypass the protocol — writing an
+# assignment owner directly, putting or deleting a handoff record. Tests
+# need them to construct adversarial states; production must never reach
+# them, so they are not compiled into it.
+test-support = []
+
 [dev-dependencies]
+personhog-coordination = { path = ".", features = ["test-support"] }
 k8s-openapi = { version = "0.24", features = ["latest"] }
 kube = { version = "0.98", features = ["client"] }
 serial_test = "3"
