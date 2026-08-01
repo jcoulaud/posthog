@@ -105,7 +105,7 @@ pub async fn run_lease_keepalive(
     authority: Option<Arc<AuthorityClock>>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let renewal_margin = Duration::from_secs(lease_ttl.max(0) as u64).mul_f64(2.0 / 3.0);
+    let renewal_margin = AuthorityClock::renewal_margin(lease_ttl);
     // `clamp` panics when min > max, and sub-250ms intervals are
     // constructible from zero-valued env config; floor the pace instead.
     let retry_pace = (interval / 4)

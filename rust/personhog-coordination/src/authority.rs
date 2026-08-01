@@ -71,10 +71,15 @@ impl AuthorityClock {
     /// object: the data plane holds one handle for the life of the
     /// process, so a new claim has to be expressible through the handle
     /// it already has.
-    pub fn begin_session(&self, margin: Duration) {
+    /// `granted_at` is when the lease's countdown started at the server,
+    /// which is earlier than this call by however long the grant and
+    /// registration took. Anchoring on it rather than on now keeps a slow
+    /// registration from silently extending the first window — the same
+    /// reasoning the keepalive applies to its own first deadline.
+    pub fn begin_session(&self, margin: Duration, granted_at: Instant) {
         self.margin_ms
             .store(margin.as_millis() as u64, Ordering::Relaxed);
-        self.confirm();
+        self.confirm_at(granted_at);
         self.surrendered.store(false, Ordering::Relaxed);
     }
 
@@ -95,8 +100,15 @@ impl AuthorityClock {
     /// the keepalive: a renewal is the one event that proves the lease
     /// was alive at a known instant.
     pub fn confirm(&self) {
-        self.confirmed_ms
-            .store(self.origin.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.confirm_at(Instant::now());
+    }
+
+    /// Record a renewal confirmed at a known instant.
+    fn confirm_at(&self, at: Instant) {
+        self.confirmed_ms.store(
+            at.saturating_duration_since(self.origin).as_millis() as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Give up authority permanently for this session. Lease loss is
@@ -124,6 +136,22 @@ impl AuthorityClock {
     pub fn margin(&self) -> Duration {
         Duration::from_millis(self.margin_ms.load(Ordering::Relaxed))
     }
+
+    /// Whether authority was given up outright, as opposed to merely
+    /// aging out. The two are different operational events — one is a
+    /// drain or a lease loss the operator expects, the other is a
+    /// keepalive that stopped running — and reporting them under one
+    /// name makes the second invisible among the first.
+    pub fn is_surrendered(&self) -> bool {
+        self.surrendered.load(Ordering::Relaxed)
+    }
+
+    /// Whether any session has claimed this clock yet. Before the first
+    /// grant there is no margin to compare against, so age is not a
+    /// meaningful reading.
+    pub fn is_claimed(&self) -> bool {
+        self.margin_ms.load(Ordering::Relaxed) > 0
+    }
 }
 
 #[cfg(test)]
@@ -132,7 +160,7 @@ mod tests {
 
     fn granted(margin: Duration) -> AuthorityClock {
         let clock = AuthorityClock::unclaimed();
-        clock.begin_session(margin);
+        clock.begin_session(margin, Instant::now());
         clock
     }
 
@@ -155,7 +183,7 @@ mod tests {
         let clock = granted(Duration::from_secs(20));
         clock.surrender();
         assert!(!clock.is_valid());
-        clock.begin_session(Duration::from_secs(20));
+        clock.begin_session(Duration::from_secs(20), Instant::now());
         assert!(clock.is_valid());
     }
 

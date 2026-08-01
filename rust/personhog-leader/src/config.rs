@@ -357,6 +357,18 @@ impl Config {
         if !self.kafka_transactional_fencing {
             return Ok(());
         }
+        // Fencing without the lease gate is the combination the e2e
+        // zombie scenario breaks: acquisition takes the partition's epoch
+        // from whoever holds it, so a pod waking inside its lease window
+        // fences the legitimate owner on its way to noticing it is dead.
+        // The gate is what gives acquisition the standing to be safe, so
+        // the dependency is refused at startup rather than documented.
+        if !self.lease_gated_authority {
+            return Err(
+                "KAFKA_TRANSACTIONAL_FENCING requires LEASE_GATED_AUTHORITY: unless                  acquisition is gated on holding the lease, a pod whose lease has lapsed                  can take the changelog fence away from the partition's real owner"
+                    .to_string(),
+            );
+        }
         let (message, txn, runway, window) = (
             self.fencing_message_timeout(),
             self.fencing_txn_timeout(),
@@ -500,6 +512,7 @@ mod fencing_timescale_tests {
     fn fenced(lease_ttl: i64) -> Config {
         let mut config = Config::init_from_env().expect("defaults");
         config.kafka_transactional_fencing = true;
+        config.lease_gated_authority = true;
         config.lease_ttl = lease_ttl;
         config.fencing_txn_timeout_ms = 0;
         config.fencing_message_timeout_ms = 0;
@@ -560,5 +573,18 @@ mod fencing_timescale_tests {
             .validate_fencing_timescales()
             .expect_err("must reject");
         assert!(err.contains("librdkafka"), "got: {err}");
+    }
+
+    /// The dependency is a startup failure, not a comment: fencing on a
+    /// pod that will acquire without checking its lease is the shape the
+    /// zombie gate reproduces.
+    #[test]
+    fn fencing_without_the_lease_gate_is_refused() {
+        let mut config = fenced(30);
+        config.lease_gated_authority = false;
+        let err = config
+            .validate_fencing_timescales()
+            .expect_err("fencing must require the gate");
+        assert!(err.contains("LEASE_GATED_AUTHORITY"), "got: {err}");
     }
 }

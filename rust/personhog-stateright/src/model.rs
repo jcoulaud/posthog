@@ -326,10 +326,16 @@ impl HandoffModel {
             return false;
         }
         // The read gate: a pod whose registration is gone refuses rather
-        // than serving from a cache it can no longer vouch for. The
-        // production check is a margin on the last confirmed renewal,
-        // which lapses strictly before the coordinator can reassign — so
-        // an unregistered pod is exactly the set this refuses.
+        // than serving from a cache it can no longer vouch for.
+        //
+        // Production refuses on a margin against the last confirmed
+        // renewal, which is a *later*-firing predicate than this one in
+        // the case where a lease is revoked between keepalive rounds:
+        // the stamp stays fresh for up to a heartbeat after the
+        // registration is gone. The model is therefore optimistic about
+        // that window, and the property holding here does not cover it —
+        // it is recorded as a residual in the coordination README rather
+        // than claimed as closed.
         if self.lease_gated_reads && !pod.registered {
             return false;
         }

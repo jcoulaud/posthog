@@ -110,6 +110,7 @@ impl PersonHogLeaderService {
     /// it is wrong. `FailedPrecondition` is the admission fence's own
     /// vocabulary: the router bounces and re-resolves toward whoever
     /// actually owns the partition.
+    #[allow(clippy::result_large_err)]
     fn check_authority(&self, partition: u32) -> Result<(), Status> {
         let Some(authority) = &self.authority else {
             return Ok(());
@@ -117,7 +118,16 @@ impl PersonHogLeaderService {
         if authority.is_valid() {
             return Ok(());
         }
-        counter!("personhog_leader_authority_lapsed_rejections_total").increment(1);
+        let reason = if authority.is_surrendered() {
+            "surrendered"
+        } else {
+            "stale"
+        };
+        counter!(
+            "personhog_leader_authority_lapsed_rejections_total",
+            "reason" => reason
+        )
+        .increment(1);
         let since = authority.since_confirmed();
         tracing::warn!(
             partition,
@@ -467,6 +477,12 @@ impl PersonHogLeader for PersonHogLeaderService {
         };
 
         let person = self.lookup_or_load(partition, &cache_key).await?;
+        // Re-check before answering. The load can wait — on the per-key
+        // lock behind another request's produce, or on a changelog
+        // recovery — for long enough that a claim valid at admission has
+        // lapsed by the time there is something to return, and it is the
+        // answer, not the arrival, that has to be backed by ownership.
+        self.check_authority(partition)?;
 
         Ok(Response::new(GetPersonResponse {
             person: Some(cached_person_to_proto(&person)),
@@ -925,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn a_pod_whose_renewals_stopped_refuses_to_serve() {
         let clock = Arc::new(AuthorityClock::unclaimed());
-        clock.begin_session(Duration::from_millis(40));
+        clock.begin_session(Duration::from_millis(40), Instant::now());
         let service = PersonHogLeaderService {
             authority: Some(Arc::clone(&clock)),
             ..make_test_service().await
@@ -949,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn surrendering_the_lease_stops_reads_at_once() {
         let clock = Arc::new(AuthorityClock::unclaimed());
-        clock.begin_session(Duration::from_secs(30));
+        clock.begin_session(Duration::from_secs(30), Instant::now());
         let service = PersonHogLeaderService {
             authority: Some(Arc::clone(&clock)),
             ..make_test_service().await
@@ -961,6 +977,61 @@ mod tests {
             service.check_authority(0).unwrap_err().code(),
             Code::FailedPrecondition
         );
+    }
+
+    /// The gate has to be wired into the RPC, not merely implemented:
+    /// this drives `get_person` itself, so removing the call from the
+    /// handler fails here rather than passing quietly.
+    #[tokio::test]
+    async fn get_person_refuses_once_authority_lapses() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_millis(40), Instant::now());
+        let service = PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        };
+        // The fixture's single partition makes 0 the only routing answer.
+        let (team_id, person_id) = (7, 42);
+        service.cache.create_partition(0);
+        service.cache.put(
+            0,
+            PersonCacheKey { team_id, person_id },
+            CachedPerson {
+                id: person_id,
+                uuid: "00000000-0000-0000-0000-000000000007".to_string(),
+                team_id,
+                properties: serde_json::json!({}),
+                created_at: 0,
+                version: 1,
+                is_identified: false,
+                approx_bytes: 64,
+            },
+        );
+
+        let request = || {
+            let mut request = Request::new(GetPersonRequest {
+                team_id,
+                person_id,
+                read_options: None,
+            });
+            request
+                .metadata_mut()
+                .insert("x-partition", "0".parse().unwrap());
+            request
+        };
+
+        service
+            .get_person(request())
+            .await
+            .expect("a renewed lease serves the read");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let err = service
+            .get_person(request())
+            .await
+            .expect_err("a lapsed lease must refuse the read");
+        assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
     /// With the gate off the pod serves exactly as before, so the flag

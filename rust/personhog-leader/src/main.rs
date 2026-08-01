@@ -117,6 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ComponentOptions::new().with_shutdown_phase(1),
     );
 
+    let authority_metrics_handle = manager.register(
+        "authority-metrics",
+        ComponentOptions::new().is_observability(true),
+    );
+
     let readiness = manager.readiness_handler();
     let liveness = manager.liveness_handler();
 
@@ -140,8 +145,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     preregister_metrics();
     // The refusals the gate can emit: rare by design, and a burst is
     // exactly what a deploy-window scrape would otherwise miss.
-    counter!("personhog_leader_authority_lapsed_rejections_total").increment(0);
-    counter!("personhog_leader_authority_lapsed_acquires_total").increment(0);
+    for reason in ["surrendered", "stale"] {
+        counter!(
+            "personhog_leader_authority_lapsed_rejections_total",
+            "reason" => reason
+        )
+        .increment(0);
+        for phase in ["warm", "resume"] {
+            counter!(
+                "personhog_leader_authority_lapsed_acquires_total",
+                "phase" => phase,
+                "reason" => reason
+            )
+            .increment(0);
+        }
+    }
 
     tokio::spawn(async move {
         let _guard = metrics_handle.process_scope();
@@ -255,14 +273,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Publish the live headroom whether or not the gate is armed: the
     // question before enabling it is how close this fleet routinely runs
     // to the margin, and that has to be answerable from a deployment
-    // that is not yet enforcing anything. A stalled keepalive shows up
-    // here as an age climbing toward the margin.
+    // that is not yet enforcing anything.
+    //
+    // This says nothing about a process-wide stall — a task that cannot
+    // run cannot report that it cannot run, which is the same limitation
+    // the clock exists to route around, and why enforcement reads the
+    // stamp inline on the request path instead of trusting a publisher.
+    // What it does show is a keepalive falling behind while the rest of
+    // the process is healthy, and the steady-state distance from the
+    // margin.
     {
         let authority = Arc::clone(&authority);
+        let handle = authority_metrics_handle;
         tokio::spawn(async move {
+            let _guard = handle.process_scope();
+            let mut shutdown = std::pin::pin!(handle.shutdown_signal());
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = &mut shutdown => break,
+                    _ = tick.tick() => {}
+                }
+                // Before the first grant there is no claim to measure
+                // against: age would read as process uptime and margin as
+                // zero, which any threshold would treat as a permanent
+                // emergency.
+                if !authority.is_claimed() {
+                    continue;
+                }
+                gauge!("personhog_leader_authority_valid").set(if authority.is_valid() {
+                    1.0
+                } else {
+                    0.0
+                });
                 gauge!("personhog_leader_authority_age_ms")
                     .set(authority.since_confirmed().as_secs_f64() * 1000.0);
                 gauge!("personhog_leader_authority_margin_ms")

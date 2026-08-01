@@ -142,9 +142,8 @@ fn current_protocol_double_zombie_loses_acked_writes() {
 ///
 /// `strong_reads_complete` is deliberately not asserted here: it still
 /// fails, because a zombie pod serves reads from its stale cache and
-/// nothing on the read path rejects them. Closing that needs a
-/// lease-validity check on read admission — see the residual ledger in
-/// `personhog-coordination/README.md`.
+/// nothing rejects them when the read gate is off. Turning it on closes
+/// that — see `fencing_and_lease_gated_reads_together_close_the_double_zombie`.
 #[test]
 fn epoch_fenced_double_zombie_is_safe() {
     let checker = model(Variant::EpochFenced, 2, 1)
@@ -817,4 +816,24 @@ fn fencing_and_lease_gated_reads_together_close_the_double_zombie() {
         !stale_reads(Variant::EpochFenced, true),
         "together they must close it"
     );
+}
+
+/// The gate makes pods refuse reads, which is exactly the kind of change
+/// that can starve liveness — so a gated configuration has to clear
+/// every property, not just the stale-read one the complementarity
+/// verdict inspects.
+#[test]
+fn a_lease_gated_fleet_is_safe_and_live() {
+    HandoffModel {
+        variant: Variant::EpochFenced,
+        lease_gated_reads: true,
+        crashes: 1,
+        zombie_window: 1,
+        ..base()
+    }
+    .checker()
+    .threads(parallelism())
+    .spawn_bfs()
+    .join()
+    .assert_properties();
 }

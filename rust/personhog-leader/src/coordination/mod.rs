@@ -97,14 +97,19 @@ impl LeaderHandoffHandler {
     /// takes the partition away from the owner that legitimately holds
     /// it. Failing here leaves the convergence to retry once the lease
     /// is confirmed again, or to end with the session if it is not.
-    fn check_authority(&self, partition: u32) -> Result<()> {
+    fn check_authority(&self, partition: u32, phase: &'static str) -> Result<()> {
         let Some(authority) = &self.authority else {
             return Ok(());
         };
         if authority.is_valid() {
             return Ok(());
         }
-        counter!("personhog_leader_authority_lapsed_acquires_total").increment(1);
+        counter!(
+            "personhog_leader_authority_lapsed_acquires_total",
+            "phase" => phase,
+            "reason" => if authority.is_surrendered() { "surrendered" } else { "stale" }
+        )
+        .increment(1);
         Err(Error::invalid_state(format!(
             "refusing to take the changelog fence for partition {partition}: no confirmed \
              lease renewal in {:?}",
@@ -139,7 +144,7 @@ impl HandoffHandler for LeaderHandoffHandler {
 
     async fn warm_partition(&self, partition: u32) -> Result<()> {
         info!(partition, "warming partition cache from kafka");
-        self.check_authority(partition)?;
+        self.check_authority(partition, "warm")?;
         // Broker-side fencing before the warm read, not after: acquiring
         // the fence bumps the producer epoch and aborts any in-flight
         // transaction from a predecessor, so every write a stale owner
@@ -185,7 +190,7 @@ impl HandoffHandler for LeaderHandoffHandler {
 
     async fn resume_partition(&self, partition: u32) -> Result<()> {
         info!(partition, "handoff cancelled; re-admitting writes");
-        self.check_authority(partition)?;
+        self.check_authority(partition, "resume")?;
         // The cancelled handoff's target may have gotten as far as
         // acquiring the changelog fence, which leaves this pod's producer
         // epoch-stale — every write would fail as fenced until the next

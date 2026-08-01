@@ -357,8 +357,10 @@ impl PodHandle {
             // A new lease is a new claim: reset the shared clock rather
             // than replacing it, so the data plane's handle carries the
             // new session without re-plumbing.
-            self.authority
-                .begin_session(AuthorityClock::renewal_margin(self.config.lease_ttl));
+            self.authority.begin_session(
+                AuthorityClock::renewal_margin(self.config.lease_ttl),
+                granted_at,
+            );
 
             let heartbeat_cancel = CancellationToken::new();
             let mut heartbeat_handle = {
@@ -509,6 +511,14 @@ impl PodHandle {
                         "pre-revoke self-fence failed; refusing in-place recovery"
                     );
                 }
+                // Only now do we stop being the owner. On this path the
+                // lease is still alive and the registration still stands:
+                // surrendering before the drain would refuse reads the
+                // protocol deliberately keeps serving — the old owner's
+                // cache is the latest state right up to cutover — while
+                // the coordinator, seeing a live owner, reassigns
+                // nothing.
+                self.authority.surrender();
                 heartbeat_cancel.cancel();
                 drop(heartbeat_handle.await);
                 drop(self.store.revoke_lease(lease_id).await);
@@ -523,6 +533,13 @@ impl PodHandle {
                 // expiry, and a fence still draining past it loses the
                 // race it exists to win. Overshoot poisons, and the
                 // process restart clears stragglers by death.
+                // Authority is already gone, so stop serving as the owner
+                // before the drain rather than after it: the coordinator
+                // may be reassigning right now, and a drain can take
+                // seconds. A stale stamp merely expires; lease loss is a
+                // fact that must not be undone by a renewal racing in
+                // behind us, which is why this latches.
+                self.authority.surrender();
                 let runway = Duration::from_secs(self.config.lease_ttl.max(0) as u64) / 3;
                 if let Err(e) = self
                     .self_fence_locally(runway.min(self.config.drain_timeout))
@@ -654,13 +671,6 @@ impl PodHandle {
     /// documented zombie residual; this closes only the part the local
     /// fence itself controls.
     async fn self_fence_locally(&self, drain_bound: Duration) -> Result<()> {
-        // Surrender first, before any await: the data plane must stop
-        // treating itself as the owner the instant we know we are not,
-        // rather than at the end of a drain that can take seconds. This
-        // is also what makes the surrender authoritative — a stale stamp
-        // merely expires, but lease loss is a fact that must not be
-        // undone by a renewal racing in behind us.
-        self.authority.surrender();
         let held: HashSet<u32> = {
             let warmed = self.warmed_partitions.lock().await;
             let fenced = self.fenced_partitions.lock().await;
