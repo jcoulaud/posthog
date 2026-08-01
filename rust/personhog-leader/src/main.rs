@@ -54,6 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::init_from_env().expect("Invalid configuration");
     config
+        .validate_lease_timescales()
+        .expect("Invalid lease configuration");
+    config
         .validate_fencing_timescales()
         .expect("Invalid fencing configuration");
     validate_table_name(&config.fallback_table).expect("Invalid FALLBACK_TABLE");
@@ -159,6 +162,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .increment(0);
         }
+    }
+    for phase in ["warm", "resume"] {
+        counter!(
+            "personhog_leader_authority_lapsed_mid_acquire_total",
+            "phase" => phase
+        )
+        .increment(0);
     }
     counter!("personhog_leader_unresolved_versions_total").increment(0);
     gauge!("personhog_leader_unresolved_versions").set(0.0);

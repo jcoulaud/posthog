@@ -967,11 +967,16 @@ pub fn preregister_fencing_metrics(partitions: u32) {
     counter!("personhog_leader_fence_slots_abandoned_total").increment(0);
     counter!("personhog_leader_fence_abandoned_total").increment(0);
     counter!("personhog_leader_fence_abort_exhausted_total").increment(0);
+    // The healing counters fire exactly during the incidents an operator
+    // would reach for them in, and rarely enough that lazy registration
+    // can swallow the first burst between scrapes.
+    counter!("personhog_leader_fence_healed_total").increment(0);
+    counter!("personhog_leader_fence_heal_failures_total").increment(0);
+    counter!("personhog_leader_fence_heal_abandoned_total").increment(0);
     for reason in ["abort_exhausted", "commit_indeterminate"] {
         counter!("personhog_leader_fence_condemned_total", "reason" => reason).increment(0);
     }
     counter!("personhog_leader_fence_commit_retries_total").increment(0);
-    counter!("personhog_leader_fenced_partition_drops_total").increment(0);
     counter!("personhog_leader_kafka_produce_errors_total").increment(0);
     for partition in 0..partitions {
         let p = partition.to_string();

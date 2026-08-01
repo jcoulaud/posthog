@@ -133,7 +133,11 @@ impl PersonHogLeaderService {
         )
         .increment(1);
         let since = authority.since_confirmed();
-        tracing::warn!(
+        // Debug, not warn: the gate refuses *every* request for the whole
+        // duration of a lapse, so this fires at the pod's full read rate
+        // during exactly the incident someone would be reading logs for.
+        // The labelled counter above carries the rate and the cause.
+        tracing::debug!(
             partition,
             ?since,
             margin = ?authority.margin(),
@@ -507,6 +511,16 @@ impl PersonHogLeader for PersonHogLeaderService {
         let partition = partition_from_metadata(&request)?;
         let req = request.into_inner();
         self.validate_partition(partition, req.team_id, req.person_id)?;
+        // A write is serving too. Broker-enforced fencing covers this
+        // path when it is on, but it cannot be turned on first — startup
+        // refuses fencing without the gate — so every fleet passes
+        // through a window where the gate is the only thing standing
+        // between a pod that stopped renewing and a write the successor
+        // will never see. The lease-loss path surrenders before it
+        // drains, deliberately, and until this check existed only reads
+        // honoured that: writes stayed admitted until the local fence
+        // landed, behind a watch teardown and a task join.
+        self.check_authority(partition)?;
 
         // Admit the write as inflight, unless the partition is fenced. A
         // fenced partition has drained for handoff: every router acked the
@@ -1101,6 +1115,74 @@ mod tests {
             .get_person(request())
             .await
             .expect_err("a lapsed lease must refuse the read");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    /// A write is serving too, and the lease-loss path surrenders before
+    /// it drains — so between the surrender and the local fence landing,
+    /// only this check stops a pod that no longer holds its lease from
+    /// acking a mutation the successor will never see. Fencing covers the
+    /// same ground when it is on, but it cannot be enabled first, so this
+    /// is the only cover the intermediate rollout state has.
+    ///
+    /// The person is seeded deliberately: without it a removed check
+    /// would still surface `FailedPrecondition` from the ownership guard
+    /// further down, and the test would pass having proved nothing.
+    #[tokio::test]
+    async fn update_refuses_once_authority_is_surrendered() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_secs(30), Instant::now());
+        let service = PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        };
+        let (team_id, person_id) = (7, 42);
+        service.cache.create_partition(0);
+        service.cache.put(
+            0,
+            PersonCacheKey { team_id, person_id },
+            CachedPerson {
+                id: person_id,
+                uuid: "00000000-0000-0000-0000-000000000007".to_string(),
+                team_id,
+                properties: serde_json::json!({}),
+                created_at: 0,
+                version: 1,
+                is_identified: false,
+                approx_bytes: 64,
+            },
+        );
+
+        let request = || {
+            let mut request = Request::new(UpdatePersonPropertiesRequest {
+                team_id,
+                person_id,
+                event_name: "$set".to_string(),
+                set_properties: serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap(),
+                set_once_properties: vec![],
+                unset_properties: vec![],
+            });
+            request
+                .metadata_mut()
+                .insert("x-partition", "0".parse().unwrap());
+            request
+        };
+
+        // Losing the lease is decided at once, not after the margin, so
+        // no sleep is needed to reach the state that matters.
+        clock.surrender();
+
+        // Bounded on purpose: with the check gone the handler runs on to
+        // produce against a broker that is not there, so an unbounded
+        // await would report this regression as a hung test rather than a
+        // failing one.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            service.update_person_properties(request()),
+        )
+        .await
+        .expect("the refusal must come from the claim check, not from a produce timeout");
+        let err = result.expect_err("a surrendered pod must not ack a write");
         assert_eq!(err.code(), Code::FailedPrecondition);
     }
 

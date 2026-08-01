@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use common_kafka::config::KafkaConfig;
 use envconfig::Envconfig;
+use personhog_coordination::authority::AuthorityClock;
 
 #[derive(Envconfig, Clone)]
 pub struct Config {
@@ -378,6 +379,29 @@ impl Config {
             + self.fencing_txn_timeout()
     }
 
+    /// The lease relations that hold whether or not fencing is on.
+    ///
+    /// `PodHandle::new` asserts that the heartbeat fits inside the
+    /// keepalive's renewal margin, but it does so several hundred lines
+    /// into startup — after etcd, Kafka and the Postgres pool are
+    /// established — and its message names the heartbeat rather than the
+    /// TTL that decides the margin. Checking it here turns a late panic
+    /// into an early refusal that names both.
+    pub fn validate_lease_timescales(&self) -> Result<(), String> {
+        let margin = AuthorityClock::renewal_margin(self.lease_ttl);
+        let heartbeat = self.heartbeat_interval();
+        if heartbeat >= margin {
+            return Err(format!(
+                "HEARTBEAT_INTERVAL_SECS ({heartbeat:?}) must be well under the keepalive \
+                 renewal margin ({margin:?} = 2/3 of LEASE_TTL {}s): the sleep between \
+                 renewals would exhaust the margin on its own, and the pod would fence \
+                 itself against healthy etcd",
+                self.lease_ttl,
+            ));
+        }
+        Ok(())
+    }
+
     /// Every relation the fenced produce path depends on, checked at
     /// startup: the derivation satisfies them wherever the lease TTL
     /// leaves room, and an operator can override either knob.
@@ -607,6 +631,46 @@ mod fencing_timescale_tests {
             "the shares leave room for more attempts than are configured; raise \
              FENCING_COMMIT_ATTEMPTS or the shares rather than leaving runway unused"
         );
+    }
+
+    /// The gap that made the fencing check misleading: a TTL it accepts
+    /// can still be one the pod refuses to start on, and that refusal
+    /// arrived hundreds of lines later, blamed the heartbeat, and never
+    /// mentioned the TTL that actually decides the margin.
+    ///
+    /// The fencing floor and the heartbeat happen not to overlap at the
+    /// default heartbeat today, so the pairs below raise it — which is
+    /// the point: the two checks constrain different things, and nothing
+    /// keeps a future change to the timeout shares from moving the
+    /// fencing floor back under the heartbeat.
+    #[test]
+    fn a_lease_ttl_the_heartbeat_cannot_fit_is_refused_up_front() {
+        for (lease_ttl, heartbeat_secs) in [(16, 11), (20, 14), (24, 16)] {
+            let mut config = fenced(lease_ttl);
+            config.heartbeat_interval_secs = heartbeat_secs;
+            assert!(
+                config.validate_fencing_timescales().is_ok(),
+                "LEASE_TTL={lease_ttl} is meant to pass the fencing check"
+            );
+            let err = config
+                .validate_lease_timescales()
+                .expect_err("but must not pass the lease check");
+            assert!(
+                err.contains("LEASE_TTL"),
+                "the refusal must name the knob to change, got: {err}"
+            );
+        }
+    }
+
+    /// And the production pairing must survive it, or the check would
+    /// refuse the fleet it was written to protect.
+    #[test]
+    fn the_production_lease_and_heartbeat_agree() {
+        let mut config = fenced(30);
+        config.heartbeat_interval_secs = 10;
+        config
+            .validate_lease_timescales()
+            .expect("LEASE_TTL=30 with a 10s heartbeat must start");
     }
 
     /// The production lease TTL must actually be usable with fencing on,
