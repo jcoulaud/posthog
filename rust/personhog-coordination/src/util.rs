@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use metrics::counter;
+use metrics::{counter, histogram};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -187,6 +187,17 @@ pub async fn run_lease_keepalive(
             };
             match outcome {
                 Ok(true) => {
+                    // The gap between confirmations is the headroom
+                    // question in one number: how close routine
+                    // operation runs to the margin at which a pod stops
+                    // being able to vouch for what it serves. Recorded
+                    // whether or not anything is gating on it, so the
+                    // distribution is known before it is enforced.
+                    histogram!(
+                        "personhog_coordination_lease_renewal_interval_ms",
+                        "component" => component
+                    )
+                    .record(last_renewed.elapsed().as_secs_f64() * 1000.0);
                     last_renewed = Instant::now();
                     if let Some(authority) = &authority {
                         authority.confirm();

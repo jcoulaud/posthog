@@ -138,6 +138,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_liveness", get(move || async move { liveness.check() }));
     let metrics_router = setup_metrics_routes(health_router);
     preregister_metrics();
+    // The refusals the gate can emit: rare by design, and a burst is
+    // exactly what a deploy-window scrape would otherwise miss.
+    counter!("personhog_leader_authority_lapsed_rejections_total").increment(0);
+    counter!("personhog_leader_authority_lapsed_acquires_total").increment(0);
 
     tokio::spawn(async move {
         let _guard = metrics_handle.process_scope();
@@ -248,6 +252,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One clock for the process: the coordination session claims and
     // surrenders it, the data plane reads it per request.
     let authority = Arc::new(AuthorityClock::unclaimed());
+    // Publish the live headroom whether or not the gate is armed: the
+    // question before enabling it is how close this fleet routinely runs
+    // to the margin, and that has to be answerable from a deployment
+    // that is not yet enforcing anything. A stalled keepalive shows up
+    // here as an age climbing toward the margin.
+    {
+        let authority = Arc::clone(&authority);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                gauge!("personhog_leader_authority_age_ms")
+                    .set(authority.since_confirmed().as_secs_f64() * 1000.0);
+                gauge!("personhog_leader_authority_margin_ms")
+                    .set(authority.margin().as_secs_f64() * 1000.0);
+            }
+        });
+    }
+
     let gated_authority = if config.lease_gated_authority {
         tracing::info!(
             "lease-gated authority enabled: reads and fence acquisition require a \
