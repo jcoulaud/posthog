@@ -247,3 +247,65 @@ async fn healing_refuses_without_standing() {
         "a partition being handed off belongs to the incoming owner"
     );
 }
+
+/// Standing can lapse *during* the broker round trip, and the fence is
+/// installed by then. Keeping it is not passive: the write path trusts
+/// the broker epoch rather than re-checking the claim, so a request
+/// landing on this pod would ack a mutation with an epoch taken from the
+/// partition's real owner. Whatever was taken has to be given back.
+#[tokio::test]
+async fn healing_gives_back_a_fence_it_lost_standing_for() {
+    let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
+    let producers = Arc::new(fenced_producers(&topic));
+    let cache = PartitionedCache::new(1 << 20);
+    let inflight = InflightTracker::new();
+    cache.create_partition(0);
+
+    // Valid at the pre-check and lost while the acquire is in flight —
+    // a margin small enough to lapse on its own would fail the pre-check
+    // instead, and never reach the case under test.
+    let clock = Arc::new(AuthorityClock::unclaimed());
+    clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
+    let losing = Arc::clone(&clock);
+    let lease_loss = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        losing.surrender();
+    });
+
+    heal_missing_fences(&producers, &cache, &inflight, Some(&clock)).await;
+    lease_loss.await.unwrap();
+    assert!(
+        !producers.holds(0),
+        "a fence taken without standing must not be retained"
+    );
+}
+
+/// The same applies to a handoff starting mid-acquire: the partition is
+/// being moved, and the incoming owner's fence is the one that should
+/// stand.
+#[tokio::test]
+async fn healing_gives_back_a_fence_when_a_handoff_starts() {
+    let topic = format!("fence_heal_{}", uuid::Uuid::new_v4().simple());
+    let producers = Arc::new(fenced_producers(&topic));
+    let cache = PartitionedCache::new(1 << 20);
+    let inflight = Arc::new(InflightTracker::new());
+    cache.create_partition(0);
+
+    let clock = AuthorityClock::unclaimed();
+    clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
+
+    // Fence the partition while the acquire is in flight.
+    let fencer = Arc::clone(&inflight);
+    let handoff = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        fencer.fence(0);
+    });
+
+    heal_missing_fences(&producers, &cache, &inflight, Some(&clock)).await;
+    handoff.await.unwrap();
+
+    assert!(
+        !producers.holds(0),
+        "a partition a handoff is moving belongs to the incoming owner"
+    );
+}

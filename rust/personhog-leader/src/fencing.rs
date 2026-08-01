@@ -765,6 +765,25 @@ pub async fn heal_missing_fences(
         }
         match fenced.acquire(partition).await {
             Ok(()) => {
+                // The round trip is long enough for the ground to move
+                // under this decision: the claim can lapse, or a handoff
+                // can start draining the partition. Either way the fence
+                // just taken is not ours to hold, and holding it is not
+                // passive — the write path trusts the broker epoch
+                // rather than re-checking the claim, so a request landing
+                // here would ack a mutation using an epoch taken from the
+                // partition's real owner, after that owner may already
+                // have warmed.
+                let lost_standing = authority.is_some_and(|a| !a.is_valid());
+                if lost_standing || inflight.is_fenced(partition) {
+                    fenced.release(partition);
+                    counter!("personhog_leader_fence_heal_abandoned_total").increment(1);
+                    warn!(
+                        partition,
+                        "released a fence taken while standing lapsed mid-acquire"
+                    );
+                    return;
+                }
                 counter!("personhog_leader_fence_healed_total").increment(1);
                 warn!(
                     partition,
@@ -772,15 +791,14 @@ pub async fn heal_missing_fences(
                 );
             }
             Err(e) => {
+                // No fence is installed on failure, so there is nothing
+                // to give back.
                 counter!("personhog_leader_fence_heal_failures_total").increment(1);
                 error!(partition, error = %e, "failed to re-take the changelog fence");
+                if authority.is_some_and(|a| !a.is_valid()) {
+                    return;
+                }
             }
-        }
-        // Whatever the outcome, the claim may have lapsed during the
-        // round trip; healing further partitions on a stale claim is the
-        // theft this gate exists to prevent.
-        if authority.is_some_and(|a| !a.is_valid()) {
-            return;
         }
     }
 }
