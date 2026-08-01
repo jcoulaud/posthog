@@ -795,6 +795,16 @@ impl PersonHogLeader for PersonHogLeaderService {
 
         let proto = cached_person_to_proto(&updated_person);
 
+        // Re-check before producing, for the same reason the read path
+        // re-checks before answering: admission proves nothing about the
+        // moment the record lands. Between the check at entry and here a
+        // write can wait on the per-key lock behind another produce, and
+        // on a changelog recovery — long enough for a starved keepalive's
+        // stamp to age out, for the lease to expire at etcd, and for the
+        // coordinator to warm a successor past the point this record
+        // would land.
+        self.check_authority(partition)?;
+
         // From here the record may reach the changelog whatever happens
         // to this request — including the request simply ceasing to exist
         // when the client's deadline expires. The guard is what makes the
@@ -1256,6 +1266,84 @@ mod tests {
             .await
             .expect("the read task must not panic")
             .expect_err("a claim that lapsed during the load must not be answered");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    /// The write path checks the claim twice for the same reason the read
+    /// path does, and asserting only on the status code cannot tell them
+    /// apart. This one pins the second.
+    ///
+    /// A write admitted under a valid claim can wait on the per-key lock
+    /// behind another produce, and on a changelog recovery — long enough
+    /// for a starved keepalive's stamp to age out, for the lease to
+    /// expire, and for a successor to warm past the point this record
+    /// would land. Acking it then is acked-write loss that needs only one
+    /// wedged pod, not a double zombie.
+    #[tokio::test]
+    async fn a_write_admitted_before_the_lapse_is_not_produced() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_secs(30), Instant::now());
+        let service = Arc::new(PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        });
+        let (team_id, person_id) = (7, 42);
+        let cache_key = PersonCacheKey { team_id, person_id };
+        service.cache.create_partition(0);
+        service.cache.put(
+            0,
+            cache_key.clone(),
+            CachedPerson {
+                id: person_id,
+                uuid: "00000000-0000-0000-0000-000000000007".to_string(),
+                team_id,
+                properties: serde_json::json!({}),
+                created_at: 0,
+                version: 1,
+                is_identified: false,
+                approx_bytes: 64,
+            },
+        );
+
+        // Hold the per-key lock so the write is admitted and then parks,
+        // where a concurrent produce for the same person would leave it.
+        let mutex = service
+            .locks
+            .entry(cache_key.clone())
+            .or_default()
+            .value()
+            .clone();
+        let held = mutex.lock().await;
+
+        let mut request = Request::new(UpdatePersonPropertiesRequest {
+            team_id,
+            person_id,
+            event_name: "$set".to_string(),
+            set_properties: serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap(),
+            set_once_properties: vec![],
+            unset_properties: vec![],
+        });
+        request
+            .metadata_mut()
+            .insert("x-partition", "0".parse().unwrap());
+        let writing = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.update_person_properties(request).await }
+        });
+        tokio::task::yield_now().await;
+
+        // The claim goes while the write is parked, then the lock frees.
+        clock.surrender();
+        drop(held);
+
+        // Bounded: without the re-check the handler runs on to produce
+        // against a broker that is not there, and an unbounded await
+        // would report the regression as a hang rather than a failure.
+        let result = tokio::time::timeout(Duration::from_secs(5), writing)
+            .await
+            .expect("the refusal must come from the claim check, not a produce timeout")
+            .expect("the write task must not panic");
+        let err = result.expect_err("a claim that lapsed during the wait must not be produced");
         assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
