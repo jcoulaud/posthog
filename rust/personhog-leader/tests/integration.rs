@@ -457,7 +457,7 @@ async fn writes_fenced_after_drain_reads_still_served() {
         pools,
         None,
         None,
-        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new()),
+        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new(1_000_000)),
     );
 
     cache.create_partition(0);
@@ -578,7 +578,7 @@ async fn drain_fences_before_waiting_on_inflight() {
         pools,
         None,
         None,
-        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new()),
+        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new(1_000_000)),
     ));
 
     cache.create_partition(0);

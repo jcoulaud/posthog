@@ -361,7 +361,7 @@ pub async fn start_leader_pod(
         pools,
         None,
         None,
-        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new()),
+        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new(1_000_000)),
     );
     let authority = Arc::new(AuthorityClock::unclaimed());
     let pod = PodHandle::new(
@@ -448,7 +448,7 @@ pub async fn start_leader_pod_with_lease_ttl(
         pools,
         None,
         None,
-        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new()),
+        std::sync::Arc::new(personhog_leader::emitted::EmittedVersions::new(1_000_000)),
     );
     let authority = Arc::new(AuthorityClock::unclaimed());
     let pod = PodHandle::new(
