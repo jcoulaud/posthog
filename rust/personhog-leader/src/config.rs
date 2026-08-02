@@ -483,6 +483,20 @@ impl Config {
     pub fn validate_lease_timescales(&self) -> Result<(), String> {
         let margin = AuthorityClock::renewal_margin(self.lease_ttl);
         let heartbeat = self.heartbeat_interval();
+        // Zero is under every margin, so the comparison below waves it
+        // through — but the keepalive uses this interval as the *timeout*
+        // for each renewal round, so a zero one times out instantly,
+        // exhausts the margin through its retry pace, and ends the
+        // session. The pod then releases every partition and starts over,
+        // for as long as it runs, without ever serving or crashing.
+        if heartbeat.is_zero() {
+            return Err(
+                "HEARTBEAT_INTERVAL_SECS must be greater than zero: the keepalive uses it as \
+                 the timeout for each renewal round, so a zero interval fences the pod against \
+                 healthy etcd in a loop it cannot leave"
+                    .to_string(),
+            );
+        }
         if heartbeat >= margin {
             return Err(format!(
                 "HEARTBEAT_INTERVAL_SECS ({heartbeat:?}) must be well under the keepalive \
@@ -769,6 +783,22 @@ mod fencing_timescale_tests {
                 "the refusal must name the knob to change, got: {err}"
             );
         }
+    }
+
+    /// Zero passes the margin comparison — it is under every margin — but
+    /// the keepalive uses the interval as each round's timeout, so it
+    /// fences the pod against healthy etcd forever.
+    #[test]
+    fn a_zero_heartbeat_is_refused() {
+        let mut config = fenced(30);
+        config.heartbeat_interval_secs = 0;
+        let err = config
+            .validate_lease_timescales()
+            .expect_err("a zero heartbeat must not start");
+        assert!(
+            err.contains("greater than zero"),
+            "the refusal must name the constraint, got: {err}"
+        );
     }
 
     /// And the production pairing must survive it, or the check would

@@ -3268,6 +3268,16 @@ async fn authority_lapses_when_renewals_stop() {
     })
     .await;
 
+    // And it must have *surrendered*, not merely aged out. With etcd
+    // dark the registration watch dies without seeing a deletion, so the
+    // only thing that can set this is the lease-loss branch giving the
+    // claim up before it drains — which is what stops the pod acking
+    // writes for a partition the coordinator may already be reassigning.
+    assert!(
+        authority.is_surrendered(),
+        "losing the lease must give the claim up, not just let it go stale"
+    );
+
     cancel.cancel();
 }
 
@@ -3313,6 +3323,12 @@ async fn authority_is_surrendered_when_the_registration_is_deleted() {
         async move { !authority.is_valid() }
     })
     .await;
+    // The margin here is forty seconds, so nothing could have aged out in
+    // ten — this is the watch giving the claim up on the deletion.
+    assert!(
+        authority.is_surrendered(),
+        "a deleted registration must surrender the claim, not wait for it to lapse"
+    );
 
     cancel.cancel();
 }

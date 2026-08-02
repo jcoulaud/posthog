@@ -530,3 +530,42 @@ async fn a_writer_woken_onto_a_condemned_producer_is_bounced() {
         }
     }
 }
+
+/// Healing must leave a partition it already holds alone. Re-acquiring
+/// runs `init_transactions`, which bumps the broker epoch — so a healing
+/// pass that ignored the fence it is already holding would fence this
+/// pod's own producer on every reconcile tick.
+///
+/// The damage lands on writes already in flight, not on the next one: a
+/// fresh write simply uses whichever producer is installed. So the write
+/// here is mid-window when the tick runs.
+#[tokio::test]
+async fn healing_leaves_a_fence_it_already_holds_alone() {
+    let topic = format!("fence_heal_noop_{}", uuid::Uuid::new_v4().simple());
+    let producers = Arc::new(fenced_producers_with_window(
+        &topic,
+        Duration::from_millis(600),
+    ));
+    let inflight = InflightTracker::new();
+    let clock = AuthorityClock::unclaimed();
+    clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
+
+    producers.acquire(0).await.expect("take the fence");
+
+    // In flight: the window is open and its commit has not fired.
+    let writing = {
+        let p = Arc::clone(&producers);
+        tokio::spawn(async move { p.produce(0, &test_person(1)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A reconcile tick with everything healthy.
+    heal_fence(&producers, &inflight, Some(&clock), 0).await;
+
+    let result = writing.await.expect("the write task must not panic");
+    assert!(
+        result.is_ok(),
+        "a healing pass must not fence the window this pod is already \
+         filling, got {result:?}"
+    );
+}
