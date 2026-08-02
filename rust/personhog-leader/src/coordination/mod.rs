@@ -64,6 +64,15 @@ pub struct LeaderHandoffHandler {
     /// Shared with the service, so that giving up a partition also gives
     /// up the version floors held for its persons.
     emitted_versions: Arc<EmittedVersions>,
+    /// Partitions whose fence this pod took during the convergence that
+    /// is still running.
+    ///
+    /// A convergence to `Serving` can both warm and resume, in that
+    /// order, and warming re-admits writes as its last act. Without this,
+    /// the resume that follows re-acquires and bumps the epoch out from
+    /// under every write admitted in between — the pod fencing its own
+    /// live window.
+    freshly_fenced: Arc<dashmap::DashSet<u32>>,
 }
 
 impl LeaderHandoffHandler {
@@ -87,6 +96,7 @@ impl LeaderHandoffHandler {
             fenced,
             authority,
             emitted_versions,
+            freshly_fenced: Arc::new(dashmap::DashSet::new()),
         }
     }
 
@@ -221,6 +231,7 @@ impl HandoffHandler for LeaderHandoffHandler {
         self.inflight.unfence(partition);
         if let Some(guard) = fence_guard {
             guard.keep();
+            self.freshly_fenced.insert(partition);
         }
         info!(partition, "partition warmed");
         Ok(())
@@ -251,6 +262,7 @@ impl HandoffHandler for LeaderHandoffHandler {
         // is the authority these floors stood in for; carrying them would
         // only constrain a partition this pod no longer serves.
         self.emitted_versions.clear_partition(partition);
+        self.freshly_fenced.remove(&partition);
         info!(partition, "partition released");
         Ok(())
     }
@@ -264,6 +276,20 @@ impl HandoffHandler for LeaderHandoffHandler {
         // handoff. Re-acquiring bumps the epoch back to this pod before
         // writes are re-admitted. (No acked write can predate this: the
         // target never serves before the assignment flips.)
+        //
+        // Unless this convergence already took the fence on its way here.
+        // Warming re-admits writes as its last act, so acquiring again
+        // would bump the epoch out from under everything admitted since —
+        // the pod fencing its own live window, and handing the successor
+        // of a genuinely moved partition an epoch nobody asked for.
+        if self.freshly_fenced.remove(&partition).is_some() {
+            info!(
+                partition,
+                "fence already taken by this convergence; not re-acquiring on resume"
+            );
+            self.inflight.unfence(partition);
+            return Ok(());
+        }
         if let Some(fenced) = &self.fenced {
             fenced
                 .acquire(partition)

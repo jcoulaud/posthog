@@ -163,11 +163,8 @@ impl PersonHogLeaderService {
         warnings: WarningsProducer,
         fenced: Option<Arc<FencedChangelogProducers>>,
         authority: Option<Arc<AuthorityClock>>,
+        emitted_versions: Arc<EmittedVersions>,
     ) -> Self {
-        // The same bound the dirty index uses: both hold one entry per
-        // person written but not yet settled, and both are attackable the
-        // same way.
-        let emitted_capacity = dirty_index.max_entries();
         Self {
             cache,
             locks,
@@ -182,7 +179,7 @@ impl PersonHogLeaderService {
             warnings,
             fenced,
             authority,
-            emitted_versions: Arc::new(EmittedVersions::new(emitted_capacity)),
+            emitted_versions,
         }
     }
 
@@ -216,12 +213,6 @@ impl PersonHogLeaderService {
             "source" => "cache", "outcome" => "ok"
         )
         .increment(1);
-    }
-
-    /// The version floors this service maintains, shared with the
-    /// handoff handler so a released partition's floors go with it.
-    pub fn emitted_versions(&self) -> Arc<EmittedVersions> {
-        Arc::clone(&self.emitted_versions)
     }
 
     /// Recover a cache miss from the right source. A person in the dirty
@@ -861,6 +852,28 @@ impl PersonHogLeader for PersonHogLeaderService {
                 // ownership statement, in the same vocabulary the
                 // admission fence uses, so the router bounces and
                 // re-resolves instead of surfacing a hard error.
+                // The partition moved *and* this window's outcome was
+                // never settled. The router still needs the ownership
+                // answer, but the version cannot be handed back: the
+                // commit may have succeeded on an attempt librdkafka
+                // re-issued internally. Deliberately not settled, and the
+                // cache entry goes so a retry re-derives rather than
+                // building on a version whose fate is in doubt.
+                Err(e @ FencedProduceError::FencedUncertain(_)) => {
+                    self.cache.remove(partition, &cache_key);
+                    counter!("personhog_leader_indeterminate_evictions_total").increment(1);
+                    tracing::error!(
+                        team_id = cache_key.team_id,
+                        person_id = cache_key.person_id,
+                        partition,
+                        error = %e,
+                        "changelog producer fenced with an unknown outcome; evicting the cached \
+                         person so a retry cannot reuse its version"
+                    );
+                    return Err(Status::failed_precondition(format!(
+                        "partition ownership fenced: {e}"
+                    )));
+                }
                 Err(e @ FencedProduceError::NotAcquired) => {
                     emitted.discarded();
                     tracing::warn!(
@@ -925,7 +938,20 @@ impl PersonHogLeader for PersonHogLeaderService {
             {
                 Ok(offset) => offset,
                 Err(e) => {
-                    emitted.discarded();
+                    // Deliberately not settled. This path collapses an
+                    // enqueue that never left the client with a delivery
+                    // that timed out after the broker may already have
+                    // appended it, and idempotence is off by default, so
+                    // the record's fate is genuinely unknown. Freeing the
+                    // version here let a retry derive the same number and
+                    // put a second record behind one that may be in the
+                    // log — the writer's strict guard then keeps whichever
+                    // arrived first and discards the acked one.
+                    //
+                    // The floor alone is enough: the next write derives
+                    // past it whether or not the cache still holds the
+                    // pre-write state, so the entry stays and reads carry
+                    // on serving the last durable version.
                     tracing::error!(
                         team_id = cache_key.team_id,
                         person_id = cache_key.person_id,
@@ -1029,6 +1055,7 @@ mod tests {
             WarningsProducer::new(producer, "clickhouse_ingestion_warnings".to_string()),
             None,
             None,
+            Arc::new(EmittedVersions::new(1_000_000)),
         )
     }
 
