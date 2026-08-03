@@ -683,7 +683,14 @@ async fn settling_commits_an_abandoned_record_before_the_handoff_advances() {
         "the record must still be uncommitted, or this proves nothing"
     );
 
-    first.settle(0).await.expect("the window must settle");
+    // Through the drain, not `settle` directly: the wiring is the part
+    // that can be deleted, and calling the method under test by hand
+    // proves only that the method exists.
+    let handler = common::test_handoff_handler(&topic, Arc::clone(&first));
+    handler
+        .drain_partition_inflight(0)
+        .await
+        .expect("the drain must not fail");
 
     assert_eq!(
         read_committed_count(&topic).await,
@@ -796,4 +803,79 @@ async fn a_poisoned_window_is_aborted_rather_than_committed() {
         .produce(0, &test_person(2))
         .await
         .expect("an aborted window leaves the producer able to open another");
+}
+
+/// A window that cannot be settled must not hold the partition hostage.
+///
+/// The drain fences writes as its first act, and the only branch that
+/// lifts that fence runs after the handoff completes — which needs the
+/// ack this drain is about to write. So a drain that refuses to ack over
+/// an unsettled window strands the partition rejecting every write for
+/// the life of the process, while reads carry on and the convergence
+/// reports success.
+///
+/// Refusing would buy nothing anyway: a producer that cannot report its
+/// outcome is one the broker accepts no further record from, and the
+/// incoming owner's `init_transactions` aborts whatever is left, exactly
+/// as it did before the drain waited at all.
+#[tokio::test]
+async fn a_window_that_cannot_settle_still_lets_the_handoff_proceed() {
+    let topic = format!("fence_unsettled_{}", uuid::Uuid::new_v4().simple());
+    let producers = Arc::new(fenced_producers(&topic));
+    producers.acquire(0).await.expect("acquire the fence");
+    producers
+        .produce(0, &test_person(1))
+        .await
+        .expect("a healthy fence writes");
+
+    // The state an abort that never landed, or a commit whose outcome
+    // stayed unknown, leaves behind.
+    producers.condemn_for_test(0);
+
+    let handler = common::test_handoff_handler(&topic, Arc::clone(&producers));
+    handler
+        .drain_partition_inflight(0)
+        .await
+        .expect("a condemned producer must not fail the drain");
+}
+
+/// A resume that skipped its acquire must leave the mark for the retry.
+///
+/// The skip branch consumed the mark, so a convergence torn down after
+/// the resume returned — but before `apply` recorded it — retried with
+/// the partition still listed as fenced and nothing to say the fence was
+/// already held. That retry re-acquires and bumps the epoch out from
+/// under the writes the first resume admitted.
+#[tokio::test]
+async fn a_repeated_resume_does_not_fence_the_window_the_first_one_admitted() {
+    let topic = format!("fence_resume_twice_{}", uuid::Uuid::new_v4().simple());
+    let producers = Arc::new(fenced_producers_with_window(
+        &topic,
+        Duration::from_secs(10),
+    ));
+    let handler = common::test_handoff_handler(&topic, Arc::clone(&producers));
+
+    producers.acquire(0).await.expect("seed the topic");
+    producers
+        .produce(0, &test_person(1))
+        .await
+        .expect("seed record");
+    handler.warm_partition(0).await.expect("warm the partition");
+    handler.resume_partition(0).await.expect("first resume");
+
+    let writing = {
+        let p = Arc::clone(&producers);
+        tokio::spawn(async move { p.produce(0, &test_person(2)).await })
+    };
+    sleep(Duration::from_millis(300)).await;
+
+    // The convergence was torn down before it could record the resume,
+    // so the same one runs again.
+    handler.resume_partition(0).await.expect("retried resume");
+
+    let result = writing.await.expect("the write task must not panic");
+    assert!(
+        result.is_ok(),
+        "a retried resume must not fence the window the first one admitted, got {result:?}"
+    );
 }

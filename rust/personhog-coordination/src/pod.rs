@@ -750,20 +750,39 @@ impl PodHandle {
                     })?
             });
         }
+        // Failures are collected rather than propagated. This runs
+        // because the pod has lost the right to serve, so giving the
+        // partitions up matters more than reporting why one of them
+        // resisted — returning on the first error would leave every
+        // other partition still served by a pod with no lease, which is
+        // the zombie this function exists to prevent.
+        let mut failures: Vec<String> = Vec::new();
         while let Some(joined) = drains.join_next().await {
-            joined
-                .map_err(|e| Error::invalid_state(format!("self-fence drain panicked: {e}")))??;
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => failures.push(e.to_string()),
+                Err(e) => failures.push(format!("self-fence drain panicked: {e}")),
+            }
         }
 
         // Phase 2: with nothing in flight anywhere, release each
         // partition (dropping cache and serving authority) and clear
         // the local ownership state.
         for partition in held {
-            self.handler.release_partition(partition).await?;
+            if let Err(e) = self.handler.release_partition(partition).await {
+                failures.push(format!("release of partition {partition}: {e}"));
+            }
             self.warmed_partitions.lock().await.remove(&partition);
             self.fenced_partitions.lock().await.remove(&partition);
         }
         gauge!("personhog_coordination_partitions_held").set(0.0);
+        if !failures.is_empty() {
+            return Err(Error::invalid_state(format!(
+                "self-fence completed with {} failure(s): {}",
+                failures.len(),
+                failures.join("; ")
+            )));
+        }
         Ok(())
     }
 
@@ -1025,6 +1044,13 @@ impl PodHandle {
                     tracing::info!(pod, partition, "converging to Drained: fencing + draining");
                     did_work = true;
                 }
+                // Recorded before the handler runs, not after. The
+                // handler fences the data plane as its first act and can
+                // fail afterwards; a record written only on success would
+                // leave writes fenced with no branch left to re-enter,
+                // since `resume_partition` below is reachable only
+                // through this set.
+                self.fenced_partitions.lock().await.insert(partition);
                 let start = Instant::now();
                 self.handler.drain_partition_inflight(partition).await?;
                 if newly_fencing {
@@ -1034,7 +1060,6 @@ impl PodHandle {
                     histogram!("personhog_coordination_partition_drain_ms")
                         .record(start.elapsed().as_secs_f64() * 1000.0);
                 }
-                self.fenced_partitions.lock().await.insert(partition);
                 if ack {
                     let handoff = handoff.expect("Drained state only derives from a handoff");
                     self.store
