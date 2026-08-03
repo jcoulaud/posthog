@@ -652,6 +652,11 @@ jobs:
                   # the lowest TTL validate_fencing_timescales accepts
                   # with fencing on, so the freeze runs past it and the
                   # run is sized to leave the woken zombie time to try.
+                  # The gate asserts rejection by consequence (an
+                  # unfenced landing fails the verifier; a crash fails
+                  # the liveness check), not by scraping fence metrics —
+                  # the deterministic fencing_integration tests carry the
+                  # per-arm coverage.
                   ./target/debug/personhog-test-harness gate \
                     --leader-env KAFKA_TRANSACTIONAL_FENCING=true \
                     --leader-env LEASE_GATED_AUTHORITY=true \
