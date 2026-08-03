@@ -166,20 +166,31 @@ def report_heartbeat_timeout(inputs: "ImportDataActivityInputs", logger: Filteri
                 },
             )
 
-            # Durable per-occurrence OOM record for the repartition trigger to read. Best-effort:
+            # Durable per-occurrence record for the repartition trigger to read. Best-effort:
             # a write failure here must never disrupt the sync.
             try:
-                from products.warehouse_sources.backend.models.oom_event import (  # noqa: PLC0415 — Django models must not be imported at this activity module's load time
-                    ExternalDataSchemaOOMEvent,
+                from products.warehouse_sources.backend.models.external_data_schema import (  # noqa: PLC0415 — Django models must not be imported at this activity module's load time
+                    ExternalDataSchema,
+                )
+                from products.warehouse_sources.backend.models.oom_event import (  # noqa: PLC0415 — as above
+                    ExternalDataSchemaSuspectedOOMEvent,
                 )
 
                 if inputs.schema_id is not None:
-                    ExternalDataSchemaOOMEvent.objects.for_team(inputs.team_id).create(
+                    schema = (
+                        ExternalDataSchema.objects.filter(id=inputs.schema_id, team_id=inputs.team_id)
+                        .only("sync_type_config")
+                        .first()
+                    )
+                    ExternalDataSchemaSuspectedOOMEvent.objects.for_team(inputs.team_id).create(
                         team_id=inputs.team_id,
                         schema_id=inputs.schema_id,
                         run_id=inputs.run_id,
                         host=last_heartbeat_host,
                         gap_seconds=gap_between_beats,
+                        # Snapshot: blame between the co-tenants of one pod kill is judged on how big
+                        # each table was at the time, not on how big it is when the row is read back.
+                        max_partition_bytes=schema.max_partition_bytes if schema else None,
                     )
             except Exception as record_error:
                 logger.debug(f"Failed to record OOM event for schema {inputs.schema_id}: {record_error}")

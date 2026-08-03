@@ -5,7 +5,7 @@ from .custom_oauth2_integration import CustomOAuth2Integration
 from .external_data_job import ExternalDataJob
 from .external_data_schema import ExternalDataSchema
 from .external_data_source import ExternalDataSource
-from .oom_event import ExternalDataSchemaOOMEvent
+from .oom_event import ExternalDataSchemaSuspectedOOMEvent
 from .pending_source_credential import PendingSourceCredential
 from .table import DataWarehouseTable
 
@@ -15,7 +15,7 @@ __all__ = [
     "DataWarehouseTable",
     "ExternalDataJob",
     "ExternalDataSchema",
-    "ExternalDataSchemaOOMEvent",
+    "ExternalDataSchemaSuspectedOOMEvent",
     "ExternalDataSource",
     "PendingSourceCredential",
     "WarehouseColumnAnnotation",

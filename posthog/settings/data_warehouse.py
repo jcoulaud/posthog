@@ -39,10 +39,25 @@ DATA_WAREHOUSE_TARGET_PARTITION_BYTES = get_from_env(
 
 # A schema that records at least this many sync OOMs within the lookback window is force-repartitioned
 # even when its largest partition is within the size budget — its real merge working set is bigger than
-# the compressed at-rest size implies (e.g. wide nested-JSON columns). See ExternalDataSchemaOOMEvent.
+# the compressed at-rest size implies (e.g. wide nested-JSON columns). See ExternalDataSchemaSuspectedOOMEvent.
 DATA_WAREHOUSE_REPARTITION_OOM_THRESHOLD = get_from_env("DATA_WAREHOUSE_REPARTITION_OOM_THRESHOLD", 3, type_cast=int)
 DATA_WAREHOUSE_REPARTITION_OOM_WINDOW_DAYS = get_from_env(
     "DATA_WAREHOUSE_REPARTITION_OOM_WINDOW_DAYS", 7, type_cast=int
+)
+
+# Classification of a suspected OOM (see ExternalDataSchemaSuspectedOOMEvent.classify). Infrastructure
+# takes down many unrelated schemas at once, so an occurrence sharing a window with at least this many
+# distinct schemas across the fleet is attributed to infrastructure rather than to one table's memory use.
+DATA_WAREHOUSE_OOM_INFRA_BURST_WINDOW_SECONDS = get_from_env(
+    "DATA_WAREHOUSE_OOM_INFRA_BURST_WINDOW_SECONDS", 1800, type_cast=int
+)
+DATA_WAREHOUSE_OOM_INFRA_BURST_MIN_SCHEMAS = get_from_env(
+    "DATA_WAREHOUSE_OOM_INFRA_BURST_MIN_SCHEMAS", 50, type_cast=int
+)
+# Activities killed by the same pod OOM are rescheduled together, so occurrences within this window of
+# each other on one host are treated as a single kill with a single plausible culprit.
+DATA_WAREHOUSE_OOM_CO_TENANT_WINDOW_SECONDS = get_from_env(
+    "DATA_WAREHOUSE_OOM_CO_TENANT_WINDOW_SECONDS", 300, type_cast=int
 )
 
 # Pre-write vacuum runs when this many delta commits have accrued since the last vacuum. Decoupled from

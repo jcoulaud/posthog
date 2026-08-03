@@ -25,7 +25,7 @@ from posthog.utils import get_machine_id
 
 from products.warehouse_sources.backend.models.external_data_job import ExternalDataJob
 from products.warehouse_sources.backend.models.external_data_schema import ExternalDataSchema
-from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaOOMEvent
+from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaSuspectedOOMEvent
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.repartition import (
     measure_partition_bytes,
     select_repartition_target,
@@ -190,7 +190,7 @@ async def maybe_flag_for_repartition(
             oom_triggered = False
         else:
             oom_count = await asyncio.to_thread(
-                ExternalDataSchemaOOMEvent.recent_count, schema, days=repartition_oom_window_days()
+                ExternalDataSchemaSuspectedOOMEvent.recent_count, schema, days=repartition_oom_window_days()
             )
             oom_triggered = oom_count >= repartition_oom_threshold()
 

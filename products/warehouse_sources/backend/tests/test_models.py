@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from django.db import DatabaseError, OperationalError, transaction
 from django.db.models import Model
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from dateutil import parser
@@ -27,7 +27,7 @@ from products.warehouse_sources.backend.models.external_data_schema import (
     update_sync_type_config_keys,
 )
 from products.warehouse_sources.backend.models.external_data_source import ExternalDataSource
-from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaOOMEvent
+from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaSuspectedOOMEvent
 from products.warehouse_sources.backend.models.ssh_tunnel import SSHTunnel
 from products.warehouse_sources.backend.models.table import DataWarehouseTable
 from products.warehouse_sources.backend.models.util import (
@@ -319,7 +319,7 @@ class TestSaveSyncTypeConfigRetriesOnConnectionDrop(BaseTest):
                 schema.record_partition_measurement(123)
 
 
-class TestExternalDataSchemaOOMEvent(BaseTest):
+class TestExternalDataSchemaSuspectedOOMEvent(BaseTest):
     def _source(self) -> ExternalDataSource:
         return ExternalDataSource.objects.create(
             team_id=self.team.pk,
@@ -332,11 +332,23 @@ class TestExternalDataSchemaOOMEvent(BaseTest):
     def _schema(self, name: str) -> ExternalDataSchema:
         return ExternalDataSchema.objects.create(team_id=self.team.pk, source=self._source(), name=name)
 
-    def _oom(self, schema: ExternalDataSchema, *, age_days: float = 0) -> ExternalDataSchemaOOMEvent:
-        event = ExternalDataSchemaOOMEvent.objects.for_team(self.team.pk).create(team_id=self.team.pk, schema=schema)
+    def _oom(
+        self,
+        schema: ExternalDataSchema,
+        *,
+        age_days: float = 0,
+        host: str | None = None,
+        max_partition_bytes: int | None = None,
+    ) -> ExternalDataSchemaSuspectedOOMEvent:
+        event = ExternalDataSchemaSuspectedOOMEvent.objects.for_team(self.team.pk).create(
+            team_id=self.team.pk,
+            schema=schema,
+            host=host,
+            max_partition_bytes=max_partition_bytes,
+        )
         if age_days:
             # created_at is auto_now_add, so backdate via an update to place the row outside the window.
-            ExternalDataSchemaOOMEvent.objects.unscoped().filter(pk=event.pk).update(
+            ExternalDataSchemaSuspectedOOMEvent.objects.unscoped().filter(pk=event.pk).update(
                 created_at=timezone.now() - timedelta(days=age_days)
             )
         return event
@@ -351,9 +363,9 @@ class TestExternalDataSchemaOOMEvent(BaseTest):
         self._oom(schema_a, age_days=10)  # outside a 7-day window
         self._oom(schema_b)  # different schema
 
-        assert ExternalDataSchemaOOMEvent.recent_count(schema_a, days=7) == 2
-        assert ExternalDataSchemaOOMEvent.recent_count(schema_a, days=30) == 3
-        assert ExternalDataSchemaOOMEvent.recent_count(schema_b, days=7) == 1
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema_a, days=7) == 2
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema_a, days=30) == 3
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema_b, days=7) == 1
 
     def test_recent_count_ignores_ooms_before_last_repartition(self) -> None:
         # A repartition fixes the OOMs that preceded it. Without this floor, those OOMs keep counting
@@ -369,12 +381,71 @@ class TestExternalDataSchemaOOMEvent(BaseTest):
         schema.save()
 
         # All three OOMs predate the repartition, so none count toward re-triggering it.
-        assert ExternalDataSchemaOOMEvent.recent_count(schema, days=7) == 0
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema, days=7) == 0
 
         # An OOM recorded after the repartition still counts: the rewrite did not fix it, so this is a
         # real escalation the controller should act on.
         self._oom(schema)
-        assert ExternalDataSchemaOOMEvent.recent_count(schema, days=7) == 1
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema, days=7) == 1
+
+    @override_settings(DATA_WAREHOUSE_OOM_INFRA_BURST_MIN_SCHEMAS=3)
+    def test_recent_count_ignores_occurrences_inside_a_fleet_wide_burst(self) -> None:
+        # A deploy or a node drain kills workers across the fleet, and every schema that was syncing
+        # records an occurrence. Counting those is what repartitioned healthy tables for reasons that
+        # had nothing to do with their partitions.
+        schema = self._schema("orders")
+        self._oom(schema)
+        for name in ("events", "persons"):
+            self._oom(self._schema(name))
+
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema, days=7) == 0
+
+    @override_settings(DATA_WAREHOUSE_OOM_INFRA_BURST_MIN_SCHEMAS=10)
+    def test_recent_count_keeps_occurrences_below_the_burst_threshold(self) -> None:
+        # The mirror of the case above: a handful of schemas failing in the same window is normal, and
+        # discarding those would leave the trigger unable to fire at all.
+        schema = self._schema("orders")
+        self._oom(schema)
+        for name in ("events", "persons"):
+            self._oom(self._schema(name))
+
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema, days=7) == 1
+
+    def test_recent_count_drops_co_tenants_of_a_bigger_table_on_the_same_worker(self) -> None:
+        # A pod OOM kills every activity in the container, so one oversized table makes its co-tenants
+        # record occurrences too. Repartitioning those victims is useless and makes them worse.
+        victim = self._schema("small_table")
+        culprit = self._schema("huge_table")
+        self._oom(victim, host="pod-a", max_partition_bytes=1_000)
+        self._oom(culprit, host="pod-a", max_partition_bytes=9_000_000_000)
+
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(victim, days=7) == 0
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(culprit, days=7) == 1
+
+    @parameterized.expand(
+        [
+            # A bigger table that died on a different worker says nothing about this kill.
+            ("different_host", {"host": "pod-b", "max_partition_bytes": 9_000_000_000}, {}),
+            # Nor does one that died on the same worker on a different day.
+            ("outside_window", {"host": "pod-a", "max_partition_bytes": 9_000_000_000, "age_days": 1}, {}),
+            # An occurrence with no size of its own must not be blamed on a neighbour, or a missing
+            # snapshot would silently discard a real OOM.
+            (
+                "own_size_unknown",
+                {"host": "pod-a", "max_partition_bytes": 9_000_000_000},
+                {"host": "pod-a", "max_partition_bytes": None},
+            ),
+        ]
+    )
+    def test_recent_count_keeps_occurrences_a_co_tenant_cannot_explain(
+        self, _name: str, other_kwargs: dict, own_kwargs: dict
+    ) -> None:
+        schema = self._schema("orders")
+        other = self._schema("huge_table")
+        self._oom(schema, **{"host": "pod-a", "max_partition_bytes": 1_000, **own_kwargs})
+        self._oom(other, **other_kwargs)
+
+        assert ExternalDataSchemaSuspectedOOMEvent.recent_count(schema, days=7) == 1
 
 
 class TestUpdateSyncTypeConfigKeys(BaseTest):

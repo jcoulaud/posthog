@@ -11,7 +11,7 @@ from parameterized import parameterized
 from products.warehouse_sources.backend.models.external_data_job import ExternalDataJob
 from products.warehouse_sources.backend.models.external_data_schema import ExternalDataSchema
 from products.warehouse_sources.backend.models.external_data_source import ExternalDataSource
-from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaOOMEvent
+from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaSuspectedOOMEvent
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.common.extract import (
     handle_corrupted_delta_log,
     handle_reset_or_full_refresh,
@@ -164,7 +164,7 @@ class TestReportHeartbeatTimeoutRecording(BaseTest):
         ):
             report_heartbeat_timeout(inputs, MagicMock())
 
-        rows = ExternalDataSchemaOOMEvent.objects.for_team(self.team.pk).filter(schema_id=schema.id)
+        rows = ExternalDataSchemaSuspectedOOMEvent.objects.for_team(self.team.pk).filter(schema_id=schema.id)
         assert rows.count() == expected_rows
         if expected_rows:
             event = rows.get()

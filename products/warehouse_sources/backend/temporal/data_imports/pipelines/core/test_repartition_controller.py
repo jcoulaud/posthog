@@ -18,7 +18,7 @@ from temporalio.testing import ActivityEnvironment
 from products.warehouse_sources.backend.models.external_data_job import ExternalDataJob
 from products.warehouse_sources.backend.models.external_data_schema import ExternalDataSchema
 from products.warehouse_sources.backend.models.external_data_source import ExternalDataSource
-from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaOOMEvent
+from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaSuspectedOOMEvent
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core import repartition_controller as ctrl
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.consts import PARTITION_KEY
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.repartition import (
@@ -263,7 +263,9 @@ class TestRepartitionOOMHistoryTrigger:
             {"partitioning_enabled": True, "partition_mode": "md5", "partition_count": 2, "partitioning_keys": ["id"]},
         )
         for _ in range(oom_count):
-            ExternalDataSchemaOOMEvent.objects.for_team(schema.team_id).create(team_id=schema.team_id, schema=schema)
+            ExternalDataSchemaSuspectedOOMEvent.objects.for_team(schema.team_id).create(
+                team_id=schema.team_id, schema=schema
+            )
 
         with tempfile.TemporaryDirectory() as d:
             delta = _write_partitioned_delta(f"{d}/t", ["0", "1"])
@@ -301,7 +303,9 @@ class TestRepartitionOOMHistoryTrigger:
             },
         )
         for _ in range(3):  # enough OOMs to flag a within-budget table if the revive guard weren't there
-            ExternalDataSchemaOOMEvent.objects.for_team(schema.team_id).create(team_id=schema.team_id, schema=schema)
+            ExternalDataSchemaSuspectedOOMEvent.objects.for_team(schema.team_id).create(
+                team_id=schema.team_id, schema=schema
+            )
 
         with tempfile.TemporaryDirectory() as d:
             delta = _write_partitioned_delta(f"{d}/t", ["0", "1"])
@@ -327,7 +331,9 @@ class TestRepartitionOOMHistoryTrigger:
             {"partitioning_enabled": True, "partition_mode": "md5", "partition_count": 2, "partitioning_keys": ["id"]},
         )
         for _ in range(3):
-            ExternalDataSchemaOOMEvent.objects.for_team(schema.team_id).create(team_id=schema.team_id, schema=schema)
+            ExternalDataSchemaSuspectedOOMEvent.objects.for_team(schema.team_id).create(
+                team_id=schema.team_id, schema=schema
+            )
 
         with tempfile.TemporaryDirectory() as d:
             delta = _write_partitioned_delta(f"{d}/t", ["0", "1"])
