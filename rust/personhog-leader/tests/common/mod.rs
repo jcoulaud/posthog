@@ -399,7 +399,10 @@ pub async fn start_leader_pod(
         PropertySizeLimits::new(655360, 524288),
         WarningsProducer::new(kafka_producer, "clickhouse_ingestion_warnings".to_string()),
         None,
-        None,
+        // A live claim rather than none, so the lease gate on the read
+        // and write paths is exercised by every test built on this
+        // fixture instead of being skipped by all of them.
+        Some(live_authority()),
         std::sync::Arc::clone(&emitted_versions),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -635,6 +638,14 @@ pub fn fenced_producers_for(topic: &str) -> personhog_leader::fencing::FencedCha
 /// A handoff handler wired to real fenced producers, for the convergence
 /// steps whose whole point is what they do to the broker's epoch.
 #[allow(dead_code)]
+/// A handler in the shape production runs: fencing on, and a lease whose
+/// renewals are current.
+///
+/// Deliberately not `None` for the authority. A fixture that leaves a
+/// mechanism out makes every test written against it exercise the
+/// degenerate path, and the gate stops being covered by anything —
+/// which is exactly how all four of its call sites became deletable
+/// with the suite green. Tests that need a lapsed claim pass their own.
 pub fn test_handoff_handler(
     topic: &str,
     fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
@@ -643,7 +654,7 @@ pub fn test_handoff_handler(
         topic,
         fenced,
         Arc::new(personhog_leader::inflight::InflightTracker::new()),
-        None,
+        live_authority(),
     )
 }
 
@@ -662,7 +673,7 @@ pub fn test_handoff_handler_with_authority(
         topic,
         fenced,
         Arc::new(personhog_leader::inflight::InflightTracker::new()),
-        Some(authority),
+        authority,
     )
 }
 
@@ -675,14 +686,21 @@ pub fn test_handoff_handler_with_inflight(
     fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
     inflight: Arc<personhog_leader::inflight::InflightTracker>,
 ) -> personhog_leader::coordination::LeaderHandoffHandler {
-    handoff_handler_with(topic, fenced, inflight, None)
+    handoff_handler_with(topic, fenced, inflight, live_authority())
 }
 
+/// Takes the authority clock by value rather than as an `Option`.
+///
+/// A fixture that can be built without one produces tests that exercise
+/// the ungated path by default, and the gate stops being covered by
+/// anything — which is how all four of its call sites became deletable
+/// with the suite green. Requiring it makes that configuration
+/// unbuildable rather than merely discouraged.
 fn handoff_handler_with(
     topic: &str,
     fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
     inflight: Arc<personhog_leader::inflight::InflightTracker>,
-    authority: Option<Arc<AuthorityClock>>,
+    authority: Arc<AuthorityClock>,
 ) -> personhog_leader::coordination::LeaderHandoffHandler {
     let mut warming = test_warming_config("test", KAFKA_BOOTSTRAP);
     warming.topic = topic.to_string();
@@ -697,7 +715,7 @@ fn handoff_handler_with(
             "personhog-writer",
         )),
         Some(fenced),
-        authority,
+        Some(authority),
         Arc::new(personhog_leader::emitted::EmittedVersions::new(1_000_000)),
     )
 }
