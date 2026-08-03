@@ -76,6 +76,33 @@ where
     panic!("condition not met within {timeout:?}");
 }
 
+/// `wait_for_condition` with a description of what is being waited on.
+///
+/// A bare timeout reports "condition not met", which names nothing —
+/// and for tests whose whole assertion *is* the wait, that is the entire
+/// failure message. Worth using wherever the timeout is the assertion
+/// rather than a setup step. (`#[track_caller]` would be the zero-churn
+/// answer, but it is a no-op on async fns.)
+#[allow(dead_code)]
+pub async fn wait_for_condition_named<F, Fut>(
+    timeout: Duration,
+    interval: Duration,
+    what: &str,
+    f: F,
+) where
+    F: Fn() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+    }
+    panic!("timed out after {timeout:?} waiting for {what}");
+}
+
 // ── Component builders ──────────────────────────────────────────
 
 pub fn start_coordinator(

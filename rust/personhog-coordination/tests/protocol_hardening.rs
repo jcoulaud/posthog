@@ -26,8 +26,8 @@ use common::{
     start_coordinator_reconcile_parked, start_pod, start_pod_gated, start_pod_with_failing_release,
     start_pod_with_flaky_resume, start_pod_with_lease_ttl, start_pod_with_stuck_drain,
     start_router_with_lease_ttl, store_at, test_store, test_store_with_prefix, wait_for_condition,
-    CutoverEvent, FlakyProxy, HandoffEvent, MockCutoverHandler, MockHandoffHandler, ETCD_ENDPOINT,
-    POLL_INTERVAL, WAIT_TIMEOUT,
+    wait_for_condition_named, CutoverEvent, FlakyProxy, HandoffEvent, MockCutoverHandler,
+    MockHandoffHandler, ETCD_ENDPOINT, POLL_INTERVAL, WAIT_TIMEOUT,
 };
 use personhog_coordination::error::Result;
 use personhog_coordination::routing_table::{RoutingTable, RoutingTableConfig, StashHandler};
@@ -3445,16 +3445,21 @@ async fn a_stuck_drain_does_not_strand_the_other_partitions_on_lease_loss() {
 
     // Partition 0's drain succeeds and 1's never will, so 0 must still
     // be given up.
-    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
-        let events = Arc::clone(&events);
-        async move {
-            events
-                .lock()
-                .await
-                .iter()
-                .any(|e| matches!(e, HandoffEvent::Released(0)))
-        }
-    })
+    wait_for_condition_named(
+        WAIT_TIMEOUT,
+        POLL_INTERVAL,
+        "partition 0 to be released despite partition 1's drain refusing",
+        || {
+            let events = Arc::clone(&events);
+            async move {
+                events
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|e| matches!(e, HandoffEvent::Released(0)))
+            }
+        },
+    )
     .await;
 
     // And 1 must not be. Release unfences and drops the cache without
@@ -3515,16 +3520,21 @@ async fn a_failed_drain_still_leaves_a_partition_that_can_be_resumed() {
     // Cancel the handoff. The pod is serving again, so it must resume —
     // which it can only do if the failed drain was still recorded.
     put_handoff(&store, 0, None, "stuck-pod-1", HandoffPhase::Complete).await;
-    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
-        let events = Arc::clone(&events);
-        async move {
-            events
-                .lock()
-                .await
-                .iter()
-                .any(|e| matches!(e, HandoffEvent::Resumed(0)))
-        }
-    })
+    wait_for_condition_named(
+        WAIT_TIMEOUT,
+        POLL_INTERVAL,
+        "the partition to resume, which needs the failed drain to have been recorded as fenced",
+        || {
+            let events = Arc::clone(&events);
+            async move {
+                events
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|e| matches!(e, HandoffEvent::Resumed(0)))
+            }
+        },
+    )
     .await;
 
     cancel.cancel();
