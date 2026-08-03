@@ -5,7 +5,7 @@ import { lemonToast } from '@posthog/lemon-ui'
 
 import { type SetupTaskId } from 'lib/components/ProductSetup'
 import { globalSetupLogic } from 'lib/components/ProductSetup/globalSetupLogic'
-import { OrganizationMembershipLevel } from 'lib/constants'
+import { FEATURE_FLAGS, OrganizationMembershipLevel } from 'lib/constants'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
 import { isKeyOf } from 'lib/utils/guards'
@@ -80,6 +80,7 @@ export interface onboardingLogicValues {
     productKey: ProductKey | null
     secondaryProductKeys: ProductKey[]
     shouldShowBillingStep: boolean
+    showRoleNotificationsStep: boolean
     stepId: string
     subscribedDuringOnboarding: boolean
     totalOnboardingSteps: number
@@ -178,6 +179,10 @@ export interface onboardingLogicMeta {
     __keaTypeGenInternalSelectorTypes: {
         onboardingFlowVariant: (featureFlags: FeatureFlagsSet) => string
         canInviteTeammates: (currentOrganization: OrganizationType | null, user: UserType | null) => boolean
+        showRoleNotificationsStep: (
+            featureFlags: FeatureFlagsSet,
+            currentOrganization: OrganizationType | null
+        ) => boolean
         billingProduct: (billing: BillingType | null, productKey: ProductKey | null) => BillingProductV2Type | null
         shouldShowBillingStep: (
             subscribedDuringOnboarding: boolean,
@@ -195,7 +200,8 @@ export interface onboardingLogicMeta {
             shouldShowBillingStep: boolean,
             isCloudOrDev: boolean | undefined,
             subscribedDuringOnboarding: boolean,
-            canInviteTeammates: boolean
+            canInviteTeammates: boolean,
+            showRoleNotificationsStep: any
         ) => OnboardingStepDescriptor[]
         onboardingStepKeys: (flow: OnboardingStepDescriptor[]) => OnboardingStepKey[]
         currentFlowStep: (flow: OnboardingStepDescriptor[], stepId: string) => OnboardingStepDescriptor | null
@@ -379,6 +385,23 @@ export const onboardingLogic = kea<onboardingLogicType>([
                 return typeof level === 'number' && level >= OrganizationMembershipLevel.Admin
             },
         ],
+        showRoleNotificationsStep: [
+            (s) => [s.featureFlags, s.currentOrganization],
+            (
+                featureFlags: FeatureFlagsSet,
+                currentOrganization: null | import('~/types').OrganizationType
+            ): boolean => {
+                // Eligibility first: reading the experiment flag records exposure, so users who
+                // could never see the step (AI subscriptions unavailable) must not reach that read.
+                if (
+                    !featureFlags[FEATURE_FLAGS.SUBSCRIPTION_AI_PROMPT] ||
+                    !currentOrganization?.is_ai_data_processing_approved
+                ) {
+                    return false
+                }
+                return featureFlags[FEATURE_FLAGS.ONBOARDING_ROLE_NOTIFICATIONS] === 'test'
+            },
+        ],
         billingProduct: [
             (s) => [s.billing, s.productKey],
             (billing: null | import('~/types').BillingType, productKey: ProductKey | null) =>
@@ -420,6 +443,7 @@ export const onboardingLogic = kea<onboardingLogicType>([
                 s.isCloudOrDev,
                 s.subscribedDuringOnboarding,
                 s.canInviteTeammates,
+                s.showRoleNotificationsStep,
             ],
             (
                 primary: ProductKey | null,
@@ -430,7 +454,8 @@ export const onboardingLogic = kea<onboardingLogicType>([
                 shouldShowBilling: boolean,
                 isCloudOrDev: boolean | undefined,
                 subscribedDuringOnboarding: boolean,
-                canInviteTeammates: boolean
+                canInviteTeammates: boolean,
+                showRoleNotificationsStep: boolean
             ): OnboardingStepDescriptor[] => {
                 if (!primary) {
                     return []
@@ -444,6 +469,7 @@ export const onboardingLogic = kea<onboardingLogicType>([
                     isCloudOrDev: Boolean(isCloudOrDev),
                     subscribedDuringOnboarding,
                     canInviteTeammates,
+                    showRoleNotificationsStep,
                 }
                 const productSteps = orderedProducts.flatMap((p, i) => {
                     const provider = onboardingProviderRegistry[p]

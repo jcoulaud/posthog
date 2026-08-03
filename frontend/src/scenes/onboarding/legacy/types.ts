@@ -63,6 +63,8 @@ export interface OnboardingFlowContext {
     subscribedDuringOnboarding: boolean
     /** Members can invite teammates — drives the trailing invite step. */
     canInviteTeammates: boolean
+    /** Experiment arm + AI-subscription availability — drives the trailing weekly-report step. */
+    showRoleNotificationsStep: boolean
 }
 
 export type StepProvider = (ctx: OnboardingFlowContext) => OnboardingStepDescriptor[]
