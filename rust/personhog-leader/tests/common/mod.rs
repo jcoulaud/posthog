@@ -722,8 +722,16 @@ fn handoff_handler_with(
 
 /// A clock holding a claim its keepalive is still confirming.
 #[allow(dead_code)]
+/// A claim that stays valid for the whole of any test.
+///
+/// The TTL is deliberately far longer than production's. Validity lapses
+/// once no renewal has been confirmed for two thirds of the TTL, and
+/// nothing renews this one — so a production-shaped 30s TTL gives a 20s
+/// margin, which the fencing suite's longest tests already reach. Tests
+/// that want a lapsed claim surrender explicitly rather than waiting one
+/// out.
 pub fn live_authority() -> Arc<AuthorityClock> {
     let clock = Arc::new(AuthorityClock::unclaimed());
-    clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
+    clock.begin_session(Duration::from_secs(3600), std::time::Instant::now());
     clock
 }
