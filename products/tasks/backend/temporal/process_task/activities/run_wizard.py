@@ -9,6 +9,7 @@ from temporalio import activity
 from posthog.temporal.common.utils import asyncify
 from posthog.utils import get_instance_region
 
+from products.tasks.backend.constants import SOURCEMAPS_DETECT_PROGRAM
 from products.tasks.backend.logic.services.sandbox import ExecutionResult, Sandbox
 from products.tasks.backend.temporal.observability import emit_agent_log, log_activity_execution
 
@@ -55,6 +56,20 @@ def _wizard_region() -> str:
     return "eu" if get_instance_region() == "EU" else "us"
 
 
+def _program_parts(wizard_config: dict | None, repository: str | None) -> list[str]:
+    program = (wizard_config or {}).get("program")
+    if program is None:
+        return ["--headless-DONOTUSE-EXPERIMENTAL"]
+    if program == SOURCEMAPS_DETECT_PROGRAM:
+        parts = ["upload-source-maps", "--detect-only"]
+        # The sandbox clone's origin remote carries a token URL, so pass the repository
+        # explicitly rather than relying on the wizard's git-remote fallback.
+        if repository:
+            parts.append(f"--repository {shlex.quote(repository)}")
+        return parts
+    raise ValueError(f"Unknown wizard program: {program}")
+
+
 def _format_wizard_output(result: ExecutionResult) -> str:
     sections = [f"PostHog setup wizard output (exit code {result.exit_code})"]
     if result.stdout:
@@ -64,17 +79,21 @@ def _format_wizard_output(result: ExecutionResult) -> str:
     return "\n".join(sections) + "\n"
 
 
-def _build_wizard_command(repo_path: str, project_id: int) -> str:
+def _build_wizard_command(
+    repo_path: str,
+    project_id: int,
+    repository: str | None = None,
+    wizard_config: dict | None = None,
+) -> str:
     # The wizard reads its access token from the POSTHOG_WIZARD_API_KEY env var injected into the
     # sandbox (see provision_sandbox), so the token never appears on the command line.
-    # --headless-DONOTUSE-EXPERIMENTAL runs the published wizard non-interactively.
     parts = [
         f"cd {shlex.quote(repo_path)} &&",
         # Wrap in `timeout` so an over-budget run exits WIZARD_TIMEOUT_EXIT_CODE (124) we can
         # detect, with partial output preserved. -k 30 escalates to SIGKILL 30s after SIGTERM.
         f"timeout -k 30 {WIZARD_RUN_TIMEOUT_SECONDS}",
         f"npx --yes {WIZARD_PACKAGE}",
-        "--headless-DONOTUSE-EXPERIMENTAL",
+        *_program_parts(wizard_config, repository),
         "--install-dir .",
         f"--region {shlex.quote(_wizard_region())}",
         f"--project-id {shlex.quote(str(project_id))}",
@@ -114,7 +133,7 @@ def run_wizard(input: RunWizardInput) -> None:
 
         emit_agent_log(ctx.run_id, "info", "Running the PostHog setup wizard")
         sandbox = Sandbox.get_by_id(input.sandbox_id)
-        command = _build_wizard_command(repo_path, ctx.team_id)
+        command = _build_wizard_command(repo_path, ctx.team_id, input.repository, ctx.wizard_config)
 
         result = sandbox.execute(command, timeout_seconds=_SANDBOX_EXEC_TIMEOUT_SECONDS)
 

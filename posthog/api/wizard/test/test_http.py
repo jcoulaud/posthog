@@ -546,6 +546,58 @@ class SetupWizardCloudRunTests(APIBaseTest):
         assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
         mock_create.assert_not_called()
 
+    @override_settings(WIZARD_CLOUD_RUN_OAUTH_CLIENT_ID="")
+    def test_sourcemaps_detection_returns_404_when_feature_not_configured(self):
+        response = self.client.post(
+            "/api/wizard/sourcemaps_detection",
+            data={"project_id": self.team.id, "repository": "acme/app"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch("posthog.api.wizard.http.tasks_facade.create_sourcemap_detection_run")
+    def test_sourcemaps_detection_creates_run_and_returns_ids(self, mock_create):
+        mock_create.return_value = MagicMock(task_id="task-uuid", latest_run=MagicMock(id="run-uuid", status="queued"))
+
+        response = self.client.post(
+            "/api/wizard/sourcemaps_detection",
+            data={"project_id": self.team.id, "repository": "acme/app"},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.content
+        assert response.json() == {"task_id": "task-uuid", "run_id": "run-uuid", "status": "queued"}
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["repository"] == "acme/app"
+        assert kwargs["user_id"] == self.user.id
+        assert kwargs["team"].id == self.team.id
+
+    @patch("posthog.api.wizard.http.tasks_facade.create_sourcemap_detection_run")
+    def test_sourcemaps_detection_rejects_invalid_repository_format(self, mock_create):
+        response = self.client.post(
+            "/api/wizard/sourcemaps_detection",
+            data={"project_id": self.team.id, "repository": "not-a-repo"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        mock_create.assert_not_called()
+
+    @patch("posthog.api.wizard.http.tasks_facade.create_sourcemap_detection_run")
+    def test_sourcemaps_detection_rejects_project_without_access(self, mock_create):
+        # Guards the wiring of the shared project-visibility helper on this action, not the
+        # helper's own logic (covered by the cloud_run tests).
+        other_org = Organization.objects.create(name="Other Detection Org")
+        other_user = User.objects.create_and_join(other_org, "other-detection@example.com", None)
+        self.client.force_login(other_user)
+
+        response = self.client.post(
+            "/api/wizard/sourcemaps_detection",
+            data={"project_id": self.team.id, "repository": "acme/app"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        mock_create.assert_not_called()
+
     @patch("posthog.api.wizard.http.WIZARD_CLOUD_RUN_DAILY_ATTEMPT_CAP", 2)
     @patch("products.tasks.backend.facade.api.recent_wizard_cloud_run_times")
     @patch("posthog.api.wizard.http.tasks_facade.create_wizard_cloud_run")

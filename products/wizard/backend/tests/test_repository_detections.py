@@ -81,6 +81,7 @@ class TestRepositoryDetectionViewSet(APIBaseTest):
         with team_scope(self.team.id):
             self.assertEqual(RepositoryDetection.objects.count(), 1)
             detection = RepositoryDetection.objects.get()
+        assert detection.report is not None
         self.assertEqual(detection.report["repo_type"], "single")
         self.assertEqual(detection.created_by, self.user)
 
@@ -95,6 +96,7 @@ class TestRepositoryDetectionViewSet(APIBaseTest):
         with team_scope(self.team.id):
             detection = RepositoryDetection.objects.get()
         self.assertIsNone(detection.report)
+        assert detection.error is not None
         self.assertEqual(detection.error["type"], "no-manifests")
 
     @parameterized.expand(

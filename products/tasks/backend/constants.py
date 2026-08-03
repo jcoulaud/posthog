@@ -3,6 +3,11 @@ from typing import Literal, get_args
 
 import posthoganalytics
 
+# wizard_config["program"] value selecting the wizard's source-map detection scan
+# (`upload-source-maps --detect-only`) instead of the default integrate flow. Shared by the
+# facade (which stamps it at task creation) and run_wizard (which maps it to CLI args).
+SOURCEMAPS_DETECT_PROGRAM = "sourcemaps-detect"
+
 SANDBOX_EVENT_INGEST_FEATURE_FLAG = "tasks-cloud-runs-sandbox-event-ingest"
 AGENT_PROXY_KEEP_STREAM_OPEN_FEATURE_FLAG = "tasks-agent-proxy-keep-stream-open"
 MODAL_VM_SANDBOX_FEATURE_FLAG = "tasks-modal-vm-sandbox"

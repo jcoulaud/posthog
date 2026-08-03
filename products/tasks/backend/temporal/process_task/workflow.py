@@ -720,6 +720,18 @@ class ProcessTaskWorkflow(PostHogWorkflow):
             self._sandbox_url = sandbox_url
             self._sandbox_connect_token = sandbox_connect_token
 
+            # Wizard-only runs end here: the wizard already did the work (and posted its result),
+            # so skip the agent lifecycle entirely — no relay, no first message, no wait loop.
+            # The finally block below still tears the sandbox down.
+            if self._is_wizard_only_run:
+                await self._update_task_run_status("completed")
+                return ProcessTaskOutput(
+                    success=True,
+                    task_result=None,
+                    error=None,
+                    sandbox_id=sandbox_id,
+                )
+
             relay_task: asyncio.Task[None] | None = None
             if not self.context.sandbox_event_ingest_enabled:
                 relay_task = asyncio.ensure_future(
@@ -1062,6 +1074,11 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         # those changes, opens the PR, and keeps it green (it never implements PostHog itself).
         await self._run_wizard_if_configured(sandbox_output)
 
+        # A wizard-only run is done: nothing for the agent to do, so never start its server.
+        # (These runs stamp overlap_clone_boot_enabled=False, so no server launched earlier.)
+        if self._is_wizard_only_run:
+            return sandbox_id, sandbox_output.sandbox_url, sandbox_output.connect_token
+
         # Start agent-server for direct connection from PostHog Desktop
         if sandbox_output.agent_server_launched:
             agent_server_output = await self._await_agent_server_ready(sandbox_output)
@@ -1389,6 +1406,17 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 workflow.logger.info(f"Agent-server logs from sandbox {sandbox_id}:\n{logs}")
         except Exception as e:
             workflow.logger.warning(f"Failed to read sandbox logs: {e}")
+
+    @property
+    def _is_wizard_only_run(self) -> bool:
+        """A run that ends after the wizard step: no agent, no PR, no CI loop (e.g. the
+        source-map detection scan, where the wizard posts its result to PostHog itself).
+
+        Deterministic on replay: wizard_config is recorded activity output, and only new
+        creation paths stamp the wizard_only key, so pre-existing histories never take the
+        short-circuit.
+        """
+        return bool(self.context.wizard_config and self.context.wizard_config.get("wizard_only"))
 
     async def _run_wizard_if_configured(self, sandbox_output: GetSandboxForRepositoryOutput) -> None:
         """Run the setup wizard in the sandbox before the agent, for cloud wizard runs only.

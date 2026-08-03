@@ -1086,6 +1086,59 @@ class TestProcessTaskWorkflowUnit:
         assert result.success is True
         relay_sandbox_events_mock.assert_not_awaited()
 
+    async def test_wizard_only_run_completes_after_the_wizard_without_an_agent(self, monkeypatch):
+        # Losing the wizard_only short-circuit would boot an agent with no pending message,
+        # which then idles until the 2h inactivity timeout on every detection run.
+        workflow = ProcessTaskWorkflow()
+        context = _build_context(
+            github_integration_id=123,
+            state={"wizard_config": {"program": "sourcemaps-detect", "wizard_only": True}},
+        )
+        update_task_run_status_mock = AsyncMock()
+        run_wizard_mock = AsyncMock()
+        start_agent_server_mock = AsyncMock()
+        forward_pending_mock = AsyncMock()
+        wait_for_event_mock = AsyncMock()
+        cleanup_sandbox_mock = AsyncMock()
+
+        monkeypatch.setattr(workflow, "_get_task_processing_context", AsyncMock(return_value=context))
+        monkeypatch.setattr(workflow, "_update_task_run_status", update_task_run_status_mock)
+        monkeypatch.setattr(workflow, "_track_workflow_event", AsyncMock())
+        monkeypatch.setattr(workflow, "_post_slack_update", AsyncMock())
+        monkeypatch.setattr(workflow, "_read_sandbox_logs", AsyncMock())
+        monkeypatch.setattr(workflow, "_cleanup_sandbox", cleanup_sandbox_mock)
+        monkeypatch.setattr(workflow, "_create_resume_snapshot", AsyncMock())
+        monkeypatch.setattr(workflow, "_emit_progress", AsyncMock())
+        monkeypatch.setattr(workflow, "_run_wizard_if_configured", run_wizard_mock)
+        monkeypatch.setattr(workflow, "_start_agent_server", start_agent_server_mock)
+        monkeypatch.setattr(workflow, "_forward_pending_user_message", forward_pending_mock)
+        monkeypatch.setattr(workflow, "_wait_for_event", wait_for_event_mock)
+        monkeypatch.setattr(
+            workflow,
+            "_get_sandbox_for_repository",
+            AsyncMock(
+                return_value=GetSandboxForRepositoryOutput(
+                    sandbox_id="sandbox-123",
+                    sandbox_url="https://sandbox.example",
+                    connect_token="connect-token",
+                    used_snapshot=False,
+                    should_create_snapshot=False,
+                )
+            ),
+        )
+        monkeypatch.setattr(process_task_workflow_module.workflow, "patched", Mock(return_value=True))
+
+        result = await workflow.run(ProcessTaskInput(run_id="run-id"))
+
+        assert result.success is True
+        assert result.sandbox_id == "sandbox-123"
+        run_wizard_mock.assert_awaited_once()
+        start_agent_server_mock.assert_not_awaited()
+        forward_pending_mock.assert_not_awaited()
+        wait_for_event_mock.assert_not_awaited()
+        update_task_run_status_mock.assert_awaited_with("completed")
+        cleanup_sandbox_mock.assert_awaited()
+
     async def test_run_relays_agent_design_signals_when_ingest_and_agent_design_enabled(self, monkeypatch):
         workflow = ProcessTaskWorkflow()
         context = _build_context(github_integration_id=123, sandbox_event_ingest_enabled=True)

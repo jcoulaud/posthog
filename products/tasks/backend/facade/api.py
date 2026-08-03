@@ -44,6 +44,7 @@ from products.tasks.backend.constants import (
     MAX_CUSTOM_IMAGES_PER_USER,
     PI_CLOUD_RUNTIME_FEATURE_FLAG,
     RESERVED_SANDBOX_ENVIRONMENT_VARIABLE_KEYS,
+    SOURCEMAPS_DETECT_PROGRAM,
     TASK_SESSION_MAX_SIZE_BYTES,
     is_blocked_sandbox_env_key,
 )
@@ -1023,6 +1024,35 @@ def create_wizard_cloud_run(
         # The agent server boots idle; this is the message that actually kicks it off once ready
         # (delivered by forward_pending_user_message). Without it the run stalls after "Started agent".
         pending_user_message=prompt,
+    )
+
+
+def create_sourcemap_detection_run(
+    *,
+    team,
+    user_id: int,
+    repository: str,
+) -> contracts.CreatedTaskDTO:
+    """Create + run a wizard-only cloud task that scans a repository for source-map setup.
+
+    The workflow provisions a sandbox, clones the repository, and runs the wizard's
+    source-map detection program (``upload-source-maps --detect-only``). The wizard posts
+    its detection report to the wizard product's repository-detections API itself, using
+    its scoped cloud-run token — so nothing flows back through this task except run status.
+    ``wizard_only`` short-circuits the workflow after the wizard step: no agent boots, no
+    PR is opened, no CI loop runs.
+    """
+    return create_and_run_task(
+        team=team,
+        title="Detect source map setup",
+        description="Scan the repository to detect where source-map upload can be configured.",
+        origin_product=Task.OriginProduct.ERROR_TRACKING,
+        user_id=user_id,
+        repository=repository,
+        create_pr=False,
+        mode="background",
+        wizard_config={"program": SOURCEMAPS_DETECT_PROGRAM, "wizard_only": True},
+        posthog_mcp_scopes="read_only",
     )
 
 

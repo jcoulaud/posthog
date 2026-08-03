@@ -144,7 +144,8 @@ class DetectionReportSerializer(serializers.Serializer):
     )
     projects = DetectedProjectSerializer(
         many=True,
-        max_length=MAX_DETECTED_PROJECTS,
+        # many_init forwards this to the ListSerializer; the stubs don't model that.
+        max_length=MAX_DETECTED_PROJECTS,  # type: ignore[call-arg]
         help_text="Projects found in the repository, one entry per project manifest.",
     )
 

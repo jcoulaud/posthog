@@ -4,6 +4,7 @@ from django.test import SimpleTestCase, override_settings
 
 from parameterized import parameterized
 
+from products.tasks.backend.constants import SOURCEMAPS_DETECT_PROGRAM
 from products.tasks.backend.logic.services.sandbox import ExecutionResult
 from products.tasks.backend.temporal.process_task.activities.run_wizard import (
     WIZARD_PACKAGE,
@@ -32,6 +33,30 @@ class TestBuildWizardCommand(SimpleTestCase):
         assert WIZARD_PACKAGE in command
         assert "--install-dir ." in command
         assert "--project-id 123" in command
+
+    def test_sourcemaps_detect_program_swaps_the_subcommand_for_the_headless_flag(self) -> None:
+        # The detect program is a natively non-interactive subcommand; the headless flag is only
+        # declared on the base command, so leaking it here would crash yargs strictOptions. The
+        # subcommand must also come before the flags, and --repository must be passed explicitly
+        # because the sandbox clone's origin remote carries a token URL.
+        command = _build_wizard_command(
+            "/tmp/workspace/repos/acme/app",
+            123,
+            "acme/app",
+            {"program": SOURCEMAPS_DETECT_PROGRAM, "wizard_only": True},
+        )
+
+        assert "upload-source-maps --detect-only" in command
+        assert "--repository acme/app" in command
+        assert "--headless-DONOTUSE-EXPERIMENTAL" not in command
+        assert command.index("upload-source-maps") < command.index("--install-dir")
+        assert "--project-id 123" in command
+
+    def test_unknown_program_raises_instead_of_running_the_default_flow(self) -> None:
+        # Running the full integrate flow for a mistyped program would silently do the wrong,
+        # much heavier thing (and open a PR); failing loudly is the only safe behavior.
+        with self.assertRaises(ValueError):
+            _build_wizard_command("/tmp/workspace/repos/a/b", 1, "a/b", {"program": "no-such-program"})
 
     @parameterized.expand([(True,), (False,)])
     def test_base_url_pins_local_instance_only_in_debug(self, debug: bool) -> None:

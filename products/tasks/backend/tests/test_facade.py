@@ -734,6 +734,28 @@ class TestFacadeReadsAndMappers(TestCase):
         self.assertIs(run.state.get("overlap_clone_boot_enabled"), False)
 
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
+    def test_create_sourcemap_detection_run_is_wizard_only(self, _mock_workflow):
+        Integration.objects.create(team=self.team, kind="github", config={})
+        created = facade.create_sourcemap_detection_run(
+            team=self.team,
+            user_id=self.user.id,
+            repository="acme-co/web",
+        )
+        run = TaskRun.objects.get(task_id=created.task_id)
+        # wizard_only is what short-circuits the workflow after the wizard step. Losing it makes
+        # the run boot an agent with no pending message, which then idles until the 2h timeout.
+        self.assertEqual(
+            run.state.get("wizard_config"),
+            {"program": "sourcemaps-detect", "wizard_only": True},
+        )
+        self.assertIs(run.state.get("overlap_clone_boot_enabled"), False)
+        # No agent, no PR: seeding either of these would re-enter the integrate-flow machinery.
+        self.assertIsNone(run.state.get("pending_user_message"))
+        self.assertIsNone(run.state.get("wizard_head_branch"))
+        task = Task.objects.get(id=created.task_id)
+        self.assertEqual(task.origin_product, Task.OriginProduct.ERROR_TRACKING)
+
+    @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     def test_create_wizard_cloud_run_pins_its_model(self, _mock_workflow):
         Integration.objects.create(team=self.team, kind="github", config={})
         created = facade.create_wizard_cloud_run(
