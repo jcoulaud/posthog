@@ -30,6 +30,8 @@ from posthog.sync import database_sync_to_async
 
 from products.wizard.backend.facade import api as wizard_facade
 from products.wizard.backend.facade.contracts import (
+    UpsertRepositoryDetectionInput,
+    UpsertRepositoryDetectionRequest,
     UpsertWizardSessionInput,
     UpsertWizardSessionRequest,
     WizardSessionDTO,
@@ -37,6 +39,8 @@ from products.wizard.backend.facade.contracts import (
 )
 from products.wizard.backend.facade.enums import RunPhase
 from products.wizard.backend.presentation.serializers import (
+    RepositoryDetectionSerializer,
+    UpsertRepositoryDetectionRequestSerializer,
     UpsertWizardSessionRequestSerializer,
     WizardSessionSerializer,
 )
@@ -364,6 +368,90 @@ class WizardSessionViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         # Releases the request-thread DB connection (auth, team resolution) before
         # the long-lived stream begins — see sse_streaming_response.
         return sse_streaming_response(generator, endpoint="wizard_session")
+
+
+class RepositoryDetectionViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
+    """Detection results a wizard agent posted for a team's repositories.
+
+    Rides the `wizard_session` scope: both are wizard-produced run data, and the
+    wizard's OAuth grant (interactive and cloud-run) already carries it.
+    """
+
+    scope_object = "wizard_session"
+    scope_object_read_actions = ["list"]
+    scope_object_write_actions = ["create"]
+    http_method_names = ["get", "post", "head", "options"]
+
+    @extend_schema(
+        description=(
+            "List repository detections for the project, ordered by updated_at desc. "
+            "Optional filters: ?repository=<org/repo> and ?kind=<kind>."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="repository",
+                required=False,
+                type=str,
+                location=OpenApiParameter.QUERY,
+                description="Filter to a single repository ('org/repo').",
+            ),
+            OpenApiParameter(
+                name="kind",
+                required=False,
+                type=str,
+                location=OpenApiParameter.QUERY,
+                description="Filter to a single detection kind (e.g. 'error-tracking-source-maps').",
+            ),
+        ],
+        responses={200: RepositoryDetectionSerializer(many=True)},
+    )
+    def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        page_offset, page_limit = pagination_window(request)
+        detections = wizard_facade.list_repository_detections(
+            self.team_id,
+            repository=request.query_params.get("repository"),
+            kind=request.query_params.get("kind") or None,
+            offset=page_offset,
+            limit=page_limit,
+        )
+        page = self.paginate_queryset(detections)
+        if page is not None:
+            return self.get_paginated_response(RepositoryDetectionSerializer(page, many=True).data)
+        return Response(RepositoryDetectionSerializer(detections, many=True).data)
+
+    @extend_schema(
+        description=(
+            "Upsert a repository detection. The `(repository, kind)` pair is the idempotency "
+            "anchor — reposting the same pair replaces the existing row. Returns 201 on "
+            "create, 200 on update."
+        ),
+        request=UpsertRepositoryDetectionRequestSerializer,
+        responses={
+            200: RepositoryDetectionSerializer,
+            201: RepositoryDetectionSerializer,
+        },
+    )
+    def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        serializer = UpsertRepositoryDetectionRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        req: UpsertRepositoryDetectionRequest = serializer.save()
+
+        user = getattr(request, "user", None)
+        created_by_id = user.id if user is not None and not user.is_anonymous else None
+
+        dto, created = wizard_facade.upsert_repository_detection(
+            UpsertRepositoryDetectionInput(
+                team_id=self.team_id,
+                repository=req.repository,
+                kind=req.kind,
+                report=req.report,
+                error=req.error,
+                task_run_id=req.task_run_id,
+                created_by_id=created_by_id,
+            )
+        )
+        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(RepositoryDetectionSerializer(dto).data, status=response_status)
 
 
 async def _wizard_session_event_stream(

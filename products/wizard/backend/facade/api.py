@@ -13,13 +13,44 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from products.wizard.backend import metrics
-from products.wizard.backend.facade.contracts import UpsertWizardSessionInput, WizardSessionDTO
-from products.wizard.backend.logic import pubsub, sessions
+from products.wizard.backend.facade.contracts import (
+    RepositoryDetectionDTO,
+    UpsertRepositoryDetectionInput,
+    UpsertWizardSessionInput,
+    WizardSessionDTO,
+)
+from products.wizard.backend.logic import pubsub, repository_detections, sessions
 
 
 def upsert(params: UpsertWizardSessionInput) -> tuple[WizardSessionDTO, bool]:
     """Returns `(dto, created)` so callers can pick 201 vs 200."""
     return sessions.upsert_session(params)
+
+
+def upsert_repository_detection(params: UpsertRepositoryDetectionInput) -> tuple[RepositoryDetectionDTO, bool]:
+    """Returns `(dto, created)` so callers can pick 201 vs 200."""
+    return repository_detections.upsert_detection(params)
+
+
+def get_repository_detection(team_id: int, repository: str, kind: str) -> RepositoryDetectionDTO | None:
+    return repository_detections.get_detection(team_id, repository, kind)
+
+
+def list_repository_detections(
+    team_id: int,
+    repository: str | None = None,
+    kind: str | None = None,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[RepositoryDetectionDTO]:
+    return repository_detections.list_detections(
+        team_id,
+        repository=repository,
+        kind=kind,
+        offset=offset,
+        limit=limit,
+    )
 
 
 def get(team_id: int, session_id: str) -> WizardSessionDTO | None:
