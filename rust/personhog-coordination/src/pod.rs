@@ -1463,6 +1463,14 @@ async fn watch_own_registration(
                     pod = %pod_name,
                     "registration deleted; surrendering serving authority immediately"
                 );
+                // Deliberately redundant: the session teardown below
+                // surrenders too, so deleting this line leaves every
+                // test green. What it buys is the interval — the pod
+                // stops answering on the watch event rather than
+                // whenever teardown finishes, and until it does it is
+                // serving strong reads on a claim the cluster has
+                // already withdrawn. The residual gap is etcd's watch
+                // delivery latency, which no call can close.
                 authority.surrender();
                 // Surrendering alone would leave a pod that holds a live
                 // lease, refuses every read, and never registers again —
