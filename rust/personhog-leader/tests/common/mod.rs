@@ -628,6 +628,7 @@ pub fn fenced_producers_for(topic: &str) -> personhog_leader::fencing::FencedCha
         Duration::from_secs(10),
         BROKER_TXN_TIMEOUT,
         Duration::from_millis(5),
+        Duration::from_secs(5),
     )
 }
 
@@ -638,11 +639,56 @@ pub fn test_handoff_handler(
     topic: &str,
     fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
 ) -> personhog_leader::coordination::LeaderHandoffHandler {
+    handoff_handler_with(
+        topic,
+        fenced,
+        Arc::new(personhog_leader::inflight::InflightTracker::new()),
+        None,
+    )
+}
+
+/// The same handler, holding an authority clock the caller controls.
+///
+/// Acquisition is gated on the published claim, so every branch that
+/// declines to take the epoch is unreachable while the handler carries no
+/// clock at all.
+#[allow(dead_code)]
+pub fn test_handoff_handler_with_authority(
+    topic: &str,
+    fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
+    authority: Arc<AuthorityClock>,
+) -> personhog_leader::coordination::LeaderHandoffHandler {
+    handoff_handler_with(
+        topic,
+        fenced,
+        Arc::new(personhog_leader::inflight::InflightTracker::new()),
+        Some(authority),
+    )
+}
+
+/// The same handler, sharing its inflight tracker with the caller — the
+/// only way to observe when the drain closes admissions relative to when
+/// it waits.
+#[allow(dead_code)]
+pub fn test_handoff_handler_with_inflight(
+    topic: &str,
+    fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
+    inflight: Arc<personhog_leader::inflight::InflightTracker>,
+) -> personhog_leader::coordination::LeaderHandoffHandler {
+    handoff_handler_with(topic, fenced, inflight, None)
+}
+
+fn handoff_handler_with(
+    topic: &str,
+    fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
+    inflight: Arc<personhog_leader::inflight::InflightTracker>,
+    authority: Option<Arc<AuthorityClock>>,
+) -> personhog_leader::coordination::LeaderHandoffHandler {
     let mut warming = test_warming_config("test", KAFKA_BOOTSTRAP);
     warming.topic = topic.to_string();
     personhog_leader::coordination::LeaderHandoffHandler::new(
         Arc::new(PartitionedCache::new(1 << 20)),
-        Arc::new(personhog_leader::inflight::InflightTracker::new()),
+        inflight,
         Arc::new(DirtyIndex::new(1_000_000)),
         warming,
         Arc::new(personhog_leader::warming::WarmClientPools::new(
@@ -651,7 +697,15 @@ pub fn test_handoff_handler(
             "personhog-writer",
         )),
         Some(fenced),
-        None,
+        authority,
         Arc::new(personhog_leader::emitted::EmittedVersions::new(1_000_000)),
     )
+}
+
+/// A clock holding a claim its keepalive is still confirming.
+#[allow(dead_code)]
+pub fn live_authority() -> Arc<AuthorityClock> {
+    let clock = Arc::new(AuthorityClock::unclaimed());
+    clock.begin_session(Duration::from_secs(30), std::time::Instant::now());
+    clock
 }
