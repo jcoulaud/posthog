@@ -860,15 +860,21 @@ impl PersonHogLeader for PersonHogLeaderService {
                 // cache entry goes so a retry re-derives rather than
                 // building on a version whose fate is in doubt.
                 Err(e @ FencedProduceError::FencedUncertain(_)) => {
-                    self.cache.remove(partition, &cache_key);
-                    counter!("personhog_leader_indeterminate_evictions_total").increment(1);
+                    // Deliberately not settled: the partition moved and
+                    // the window's own outcome never came back, so the
+                    // record may or may not be in the log. Keeping the
+                    // version spent is the whole of what safety needs.
+                    counter!(
+                        "personhog_leader_indeterminate_outcomes_total",
+                        "fenced" => "true"
+                    )
+                    .increment(1);
                     tracing::error!(
                         team_id = cache_key.team_id,
                         person_id = cache_key.person_id,
                         partition,
                         error = %e,
-                        "changelog producer fenced with an unknown outcome; evicting the cached \
-                         person so a retry cannot reuse its version"
+                        "changelog producer fenced with an unknown outcome; version kept spent"
                     );
                     return Err(Status::failed_precondition(format!(
                         "partition ownership fenced: {e}"
@@ -900,15 +906,17 @@ impl PersonHogLeader for PersonHogLeaderService {
                     // Deliberately not settled: whether the record exists
                     // is exactly what is unknown, so the version stays
                     // spent and the retry derives past it.
-                    self.cache.remove(partition, &cache_key);
-                    counter!("personhog_leader_indeterminate_evictions_total").increment(1);
+                    counter!(
+                        "personhog_leader_indeterminate_outcomes_total",
+                        "fenced" => "false"
+                    )
+                    .increment(1);
                     tracing::error!(
                         team_id = cache_key.team_id,
                         person_id = cache_key.person_id,
                         partition,
                         error = %e,
-                        "changelog commit outcome unknown; evicting the cached person so a \
-                         retry cannot reuse its version"
+                        "changelog commit outcome unknown; version kept spent"
                     );
                     return Err(Status::unknown(format!(
                         "person state may or may not have been stored: {e}"
@@ -948,10 +956,16 @@ impl PersonHogLeader for PersonHogLeaderService {
                     // log — the writer's strict guard then keeps whichever
                     // arrived first and discards the acked one.
                     //
-                    // The floor alone is enough: the next write derives
-                    // past it whether or not the cache still holds the
-                    // pre-write state, so the entry stays and reads carry
-                    // on serving the last durable version.
+                    // The floor alone carries that: the next write
+                    // derives past it whether or not the cache still
+                    // holds the pre-write state. The entry stays, so
+                    // reads may answer with a version older than the
+                    // changelog until a later write for this person
+                    // settles one. Evicting instead would resolve
+                    // nothing — recovery reads the last *marked* offset,
+                    // which is the previous write that did succeed — and
+                    // would answer NOT_FOUND outright once that mark is
+                    // pruned and no fallback pool is configured.
                     tracing::error!(
                         team_id = cache_key.team_id,
                         person_id = cache_key.person_id,
@@ -1384,6 +1398,76 @@ mod tests {
             .expect("the refusal must come from the claim check, not a produce timeout")
             .expect("the write task must not panic");
         let err = result.expect_err("a claim that lapsed during the wait must not be produced");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    /// The admission checks refuse *before* the request does any work, and
+    /// only the wait distinguishes them from the pre-answer re-checks: a
+    /// request that reaches the per-key lock has already been admitted.
+    ///
+    /// Holding that lock turns the difference into a deadline. With
+    /// admission intact neither call ever reaches it; without it they park
+    /// there and are refused only once the lock frees, having meanwhile
+    /// taken an inflight seat a handoff's drain must wait out and, on a
+    /// miss, driven a Postgres fallback or a changelog recovery for a
+    /// partition this pod no longer answers for.
+    #[tokio::test]
+    async fn a_request_arriving_after_the_lapse_is_refused_before_it_loads() {
+        let clock = Arc::new(AuthorityClock::unclaimed());
+        clock.begin_session(Duration::from_secs(30), Instant::now());
+        let service = Arc::new(PersonHogLeaderService {
+            authority: Some(Arc::clone(&clock)),
+            ..make_test_service().await
+        });
+        let (team_id, person_id) = (7, 42);
+        let cache_key = PersonCacheKey { team_id, person_id };
+        // Deliberately unseeded: the read reaches the lock only on a
+        // miss, and a hit would let a dropped admission check still be
+        // caught by the pre-answer one, proving nothing.
+        service.cache.create_partition(0);
+
+        // Anything admitted parks here; nothing admitted ever arrives.
+        let mutex = service
+            .locks
+            .entry(cache_key.clone())
+            .or_default()
+            .value()
+            .clone();
+        let _held = mutex.lock().await;
+
+        clock.surrender();
+
+        let mut read = Request::new(GetPersonRequest {
+            team_id,
+            person_id,
+            read_options: None,
+        });
+        read.metadata_mut()
+            .insert("x-partition", "0".parse().unwrap());
+        let err = tokio::time::timeout(Duration::from_millis(200), service.get_person(read))
+            .await
+            .expect("the read must be refused at admission, not behind the load")
+            .expect_err("a lapsed claim must not be served");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+
+        let mut write = Request::new(UpdatePersonPropertiesRequest {
+            team_id,
+            person_id,
+            event_name: "$set".to_string(),
+            set_properties: serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap(),
+            set_once_properties: vec![],
+            unset_properties: vec![],
+        });
+        write
+            .metadata_mut()
+            .insert("x-partition", "0".parse().unwrap());
+        let err = tokio::time::timeout(
+            Duration::from_millis(200),
+            service.update_person_properties(write),
+        )
+        .await
+        .expect("the write must be refused at admission, not behind the load")
+        .expect_err("a lapsed claim must not be admitted");
         assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
