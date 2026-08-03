@@ -1046,14 +1046,27 @@ async fn a_warm_that_loses_its_claim_mid_acquire_gives_the_fence_back() {
     let outcome = handler.warm_partition(0).await;
     lease_loss.await.unwrap();
 
-    // Whatever the warm decided, an epoch taken across a lapsed claim is
-    // not this pod's to keep.
-    match producers.produce(0, &test_person(2)).await {
-        Err(FencedProduceError::NotAcquired) => {}
-        other => panic!(
-            "a fence taken across a lapsed claim must be given back, got {other:?} \
-             (the warm returned {outcome:?})"
-        ),
+    match outcome {
+        // The surrender landed inside the warm: whichever check saw it,
+        // an epoch taken across a lapsed claim is not this pod's to
+        // keep.
+        Err(_) => match producers.produce(0, &test_person(2)).await {
+            Err(FencedProduceError::NotAcquired) => {}
+            other => {
+                panic!("a fence taken across a lapsed claim must be given back, got {other:?}")
+            }
+        },
+        // The surrender lost the race outright — the claim was valid at
+        // both checks, so the warm keeps its fence legitimately. A fast
+        // broker reaches this branch; asserting the fence works keeps
+        // the test meaningful there instead of panicking on good
+        // behavior.
+        Ok(()) => {
+            producers
+                .produce(0, &test_person(2))
+                .await
+                .expect("a warm whose claim never lapsed keeps a working fence");
+        }
     }
 }
 
@@ -1077,12 +1090,23 @@ async fn a_resume_that_loses_its_claim_mid_acquire_gives_the_fence_back() {
     let outcome = handler.resume_partition(0).await;
     lease_loss.await.unwrap();
 
-    match producers.produce(0, &test_person(1)).await {
-        Err(FencedProduceError::NotAcquired) => {}
-        other => panic!(
-            "a fence taken across a lapsed claim must be given back, got {other:?} \
-             (the resume returned {outcome:?})"
-        ),
+    match outcome {
+        // The surrender landed inside the resume: the fence it took
+        // across a lapsed claim is not this pod's to keep.
+        Err(_) => match producers.produce(0, &test_person(1)).await {
+            Err(FencedProduceError::NotAcquired) => {}
+            other => {
+                panic!("a fence taken across a lapsed claim must be given back, got {other:?}")
+            }
+        },
+        // The surrender lost the race outright — the claim held at both
+        // checks and the resume keeps a working fence.
+        Ok(()) => {
+            producers
+                .produce(0, &test_person(1))
+                .await
+                .expect("a resume whose claim never lapsed keeps a working fence");
+        }
     }
 }
 

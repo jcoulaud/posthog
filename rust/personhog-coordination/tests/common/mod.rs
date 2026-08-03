@@ -370,6 +370,7 @@ pub fn start_pod_with_flaky_release(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });
@@ -391,6 +392,10 @@ pub struct StuckDrainHandler {
 impl HandoffHandler for StuckDrainHandler {
     async fn drain_partition_inflight(&self, partition: u32) -> Result<()> {
         if partition == self.stuck {
+            self.events
+                .lock()
+                .await
+                .push(HandoffEvent::DrainFailed(partition));
             return Err(personhog_coordination::error::Error::invalid_state(
                 format!("drain refuses for partition {partition}"),
             ));
@@ -533,6 +538,7 @@ pub fn start_pod_with_hanging_drain(
         },
         Arc::new(handler),
         None,
+        Arc::new(AuthorityClock::unclaimed()),
     );
     let token = cancel.child_token();
     let join_handle = tokio::spawn(async move { pod.run(token).await });
@@ -866,6 +872,10 @@ impl Drop for FlakyProxy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandoffEvent {
     Drained(u32),
+    /// A drain attempt that returned an error — pushed by handlers whose
+    /// failures are the scenario, so tests can sequence on the attempt
+    /// having happened rather than racing the watch.
+    DrainFailed(u32),
     Warmed(u32),
     Released(u32),
     Resumed(u32),

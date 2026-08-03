@@ -637,17 +637,15 @@ pub fn fenced_producers_for(topic: &str) -> personhog_leader::fencing::FencedCha
     )
 }
 
-/// A handoff handler wired to real fenced producers, for the convergence
-/// steps whose whole point is what they do to the broker's epoch.
-#[allow(dead_code)]
-/// A handler in the shape production runs: fencing on, and a lease whose
-/// renewals are current.
+/// A handoff handler wired to real fenced producers, in the shape
+/// production runs: fencing on, and a lease whose renewals are current.
 ///
 /// Deliberately not `None` for the authority. A fixture that leaves a
 /// mechanism out makes every test written against it exercise the
 /// degenerate path, and the gate stops being covered by anything —
 /// which is exactly how all four of its call sites became deletable
 /// with the suite green. Tests that need a lapsed claim pass their own.
+#[allow(dead_code)]
 pub fn test_handoff_handler(
     topic: &str,
     fenced: Arc<personhog_leader::fencing::FencedChangelogProducers>,
