@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from drf_spectacular.utils import extend_schema
 from rest_framework import exceptions, pagination, serializers, viewsets
+from rest_framework.generics import get_object_or_404
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -322,8 +323,10 @@ class CommentViewSet(TeamAndOrgViewSetMixin, ForbidDestroyModel, viewsets.ModelV
         context["get_user_access_control"] = lambda: self.user_access_control
         return context
 
-    def get_object(self):
-        comment = super().get_object()
+    def safely_get_object(self, queryset: QuerySet) -> Comment:
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_value = self.kwargs[lookup_url_kwarg]
+        comment = get_object_or_404(queryset, **{self.lookup_field: lookup_value})
         if comment.scope in {"task", "task_artifact", "desktop_canvas"}:
             from products.tasks.backend.facade.api import task_comment_target_is_accessible  # noqa: PLC0415
 
