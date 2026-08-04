@@ -56,11 +56,7 @@ export function TaskRepositoryAttachment({
       label={label}
       hint={disabled ? undefined : "Click to change"}
       preview={
-        cloud ? (
-          <GithubLogoIcon size={16} />
-        ) : (
-          <FolderOpenIcon size={16} />
-        )
+        cloud ? <GithubLogoIcon size={16} /> : <FolderOpenIcon size={16} />
       }
       onOpen={disabled ? undefined : onOpen}
     />
