@@ -37,6 +37,10 @@ import {
 import { copyCanvasLink } from "@posthog/ui/features/canvas/utils/copyCanvasLink";
 import { buildCommentThreads } from "@posthog/ui/features/sessions/components/commentViewTypes";
 import { useCommentsQuery } from "@posthog/ui/features/sessions/components/useComments";
+import {
+  MentionAvailabilityProvider,
+  PRIVATE_SPACE_MENTIONS_DISABLED,
+} from "@posthog/ui/features/sessions/mentionAvailability";
 import { TaskHeaderActions } from "@posthog/ui/features/task-detail/components/TaskHeaderActions";
 import { useTasks } from "@posthog/ui/features/tasks/useTasks";
 import { toast } from "@posthog/ui/primitives/toast";
@@ -272,6 +276,11 @@ export function WebsiteLayout() {
     : undefined;
 
   const { channels } = useChannels();
+  const mentionsDisabledReason =
+    channels.find((channel) => channel.id === channelId)?.channelType ===
+    "personal"
+      ? PRIVATE_SPACE_MENTIONS_DISABLED
+      : null;
   const channelName = channelId
     ? (channels.find((c) => c.id === channelId)?.name ??
       (spacesLayout ? "Space" : "Channel"))
@@ -344,7 +353,9 @@ export function WebsiteLayout() {
         </Flex>
       )}
       <Box flexGrow="1" overflow="hidden">
-        <Outlet />
+        <MentionAvailabilityProvider disabledReason={mentionsDisabledReason}>
+          <Outlet />
+        </MentionAvailabilityProvider>
       </Box>
       {/* Warm-iframe pool for canvases. Mounted once here so it persists across
           every in-space navigation; overlays itself onto the active canvas's
