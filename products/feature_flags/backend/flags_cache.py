@@ -939,9 +939,9 @@ def get_cache_stats() -> dict[str, Any]:
 # The signal handlers themselves stay; their tails simplify at cutover.
 
 # Per-team gate that routes invalidation to Kafka instead of Celery — see
-# _enqueue_invalidation for why the two paths are mutually exclusive. The key
-# string is kept as "dual-write" (not renamed to match KAFKA_ROUTING_FLAG) since
-# it's the live PostHog flag key — renaming it would repoint the rollout.
+# _enqueue_invalidation for the Celery fallback when the Kafka produce fails.
+# The key string is kept as "dual-write" (not renamed to match KAFKA_ROUTING_FLAG)
+# since it's the live PostHog flag key — renaming it would repoint the rollout.
 KAFKA_ROUTING_FLAG = "flags-cache-kafka-dual-write"
 
 
@@ -992,13 +992,15 @@ def _route_to_kafka(team_id: int) -> bool:
     return bool(result)
 
 
-def _produce_invalidation(team_id: int) -> None:
+def _produce_invalidation(team_id: int) -> bool:
     """Produce a single invalidation message; swallow Kafka errors.
 
-    A produce failure here must not raise out of a signal handler — see
-    `_enqueue_invalidation` for why that means the invalidation is dropped
-    rather than retried via Celery. Per-message delivery success/failure is
-    also counted in KAFKA_PRODUCER_MESSAGES_COUNTER (wired in `_KafkaProducer.produce`).
+    A produce failure here must not raise out of a signal handler. Returns
+    True on success, False if the produce call itself raised — the caller
+    (`_enqueue_invalidation`) falls back to Celery on False so a produce
+    failure doesn't leave the team's cache stale for its full TTL. Per-message
+    delivery success/failure is also counted in KAFKA_PRODUCER_MESSAGES_COUNTER
+    (wired in `_KafkaProducer.produce`).
 
     `data` must be a dict (not pre-encoded bytes): `_KafkaProducer.produce`
     runs it through `json_serializer` (`json.dumps` + utf-8 encode). Passing
@@ -1018,8 +1020,10 @@ def _produce_invalidation(team_id: int) -> None:
                 data=msg.model_dump(mode="json"),
                 key=str(team_id),
             )
+        return True
     except Exception as e:
         logger.warning("flags_cache_invalidation_produce_failed", team_id=team_id, error=str(e), exc_info=True)
+        return False
 
 
 def _enqueue_invalidation(team_id: int) -> None:
@@ -1032,15 +1036,13 @@ def _enqueue_invalidation(team_id: int) -> None:
     Cohort invalidation is intentionally not routed here, since cohort changes flow through their
     own topic.
 
-    The two paths are mutually exclusive so the rollout proves the Kafka path
-    actually works end to end: Celery is not a fallback when the flag is on,
-    so a stuck Kafka producer shows up as a stale cache for that team instead
-    of being masked by Celery quietly picking up the slack. `_produce_invalidation`
-    still swallows its own errors — a produce failure must not raise out of a
-    signal handler — but for a flagged team that failure means the invalidation
-    is dropped, not retried via Celery. Watch `flags_cache_invalidation_produce_failed`
-    logs during rollout. Celery's `.delay()` is allowed to raise when the flag
-    is off — it's the sole path in that case and operators want broker failures loud.
+    Kafka is the primary path for a flagged team, but Celery is the fallback
+    when `_produce_invalidation` fails to produce — a dropped invalidation
+    would otherwise leave the team's cache stale for its full TTL with no
+    retry. Watch `flags_cache_invalidation_produce_failed` logs for produce
+    failures during rollout. Celery's `.delay()` is allowed to raise when the
+    flag is off or when it's used as the fallback — operators want broker
+    failures loud rather than swallowed on top of a Kafka failure.
 
     Guarded on FLAGS_REDIS_URL here (not just at each call site) so every caller, including
     ones outside a signal handler, gets the same no-op-when-unconfigured behavior for free.
@@ -1051,7 +1053,8 @@ def _enqueue_invalidation(team_id: int) -> None:
     from products.feature_flags.backend.tasks import update_team_service_flags_cache
 
     if _route_to_kafka(team_id):
-        _produce_invalidation(team_id)
+        if not _produce_invalidation(team_id):
+            update_team_service_flags_cache.delay(team_id)
     else:
         update_team_service_flags_cache.delay(team_id)
 

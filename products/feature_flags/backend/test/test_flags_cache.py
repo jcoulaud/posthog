@@ -745,8 +745,8 @@ class TestServiceFlagsSignals(BaseTest):
 @override_settings(FLAGS_REDIS_URL="redis://test")
 class TestServiceFlagsKafkaRouting(BaseTest):
     """Kafka/Celery routing side of the signal handlers. The per-team feature
-    flag exclusively routes each invalidation to Kafka or Celery — never both —
-    and a Kafka produce failure must not break the signal handler."""
+    flag routes each invalidation to Kafka or Celery, falling back to Celery
+    when a Kafka produce fails so the invalidation is never silently dropped."""
 
     def setUp(self):
         super().setUp()
@@ -806,13 +806,14 @@ class TestServiceFlagsKafkaRouting(BaseTest):
     @patch("products.feature_flags.backend.flags_cache._route_to_kafka", return_value=True)
     @patch("products.feature_flags.backend.tasks.update_team_service_flags_cache")
     @patch("django.db.transaction.on_commit", lambda fn: fn())
-    def test_flag_on_kafka_failure_does_not_raise_or_fall_back_to_celery(
+    def test_flag_on_kafka_failure_does_not_raise_and_falls_back_to_celery(
         self, mock_task, mock_gate, mock_producer_scope
     ):
         mock_producer_scope.side_effect = RuntimeError("kafka cluster unreachable")
 
-        # Should not raise — Kafka outage must not break flag editing. Celery
-        # is not a fallback when the flag is on, so it must stay untouched.
+        # Should not raise — Kafka outage must not break flag editing. A produce
+        # failure must fall back to Celery, otherwise the invalidation is dropped
+        # and the team's cache goes stale for its full TTL.
         FeatureFlag.objects.create(
             team=self.team,
             key="flag-on-kafka-error",
@@ -820,7 +821,7 @@ class TestServiceFlagsKafkaRouting(BaseTest):
             filters={"groups": [{"properties": [], "rollout_percentage": 100}]},
         )
 
-        mock_task.delay.assert_not_called()
+        mock_task.delay.assert_called_once_with(self.team.id)
         mock_gate.assert_called_once_with(self.team.id)
         mock_producer_scope.assert_called_once()
 
