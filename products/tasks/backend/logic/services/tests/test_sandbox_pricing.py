@@ -8,6 +8,7 @@ from products.tasks.backend.logic.services.sandbox_pricing import (
     ComputeRateCard,
     ComputeRateCardConfigurationError,
     calculate_sandbox_compute_cost,
+    get_compute_rate_cards_for_period,
     validate_compute_rate_cards,
 )
 
@@ -266,3 +267,11 @@ def test_usage_before_compute_billing_effective_date_is_not_priced():
 def test_invalid_missing_overlapping_or_ambiguous_rate_cards_fail_safely(cards, message):
     with pytest.raises(ComputeRateCardConfigurationError, match=message):
         validate_compute_rate_cards(cards)
+
+
+def test_returns_every_rate_card_overlapping_the_displayed_period():
+    assert get_compute_rate_cards_for_period(
+        NEXT_RATE_AT - timedelta(days=1),
+        NEXT_RATE_AT + timedelta(days=1),
+        (RATE_V1, RATE_V2),
+    ) == (RATE_V1, RATE_V2)
