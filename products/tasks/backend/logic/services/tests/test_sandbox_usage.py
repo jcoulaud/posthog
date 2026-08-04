@@ -250,7 +250,7 @@ class TestSandboxUsageAggregation(SandboxUsageBase):
     def _loop_session(
         self, *, internal: bool, client_provenance: TaskClientProvenance | None = TaskClientProvenance.POSTHOG_DESKTOP
     ) -> SandboxSession:
-        loop = Loop.objects.create(
+        loop = Loop.objects.unscoped().create(
             team=self.team,
             name="loop",
             instructions="run",
