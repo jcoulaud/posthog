@@ -57,7 +57,11 @@ from products.tasks.backend.facade import (
     cancellation as tasks_cancellation,
     contracts as tasks_contracts,
 )
-from products.tasks.backend.facade.access import cloud_usage_limit_response, code_access_required_response
+from products.tasks.backend.facade.access import (
+    cloud_usage_limit_response,
+    code_access_required_response,
+    compute_quota_limit_response,
+)
 from products.tasks.backend.facade.client_provenance import get_task_client_provenance
 from products.tasks.backend.facade.metrics import (
     StreamConnectionOutcome,
@@ -339,17 +343,29 @@ class TaskViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
             raise NotFound()
         return Response(TaskSerializer(task).data)
 
-    @extend_schema(request=TaskCreateSerializer, responses={201: TaskSerializer})
+    @extend_schema(
+        request=TaskCreateSerializer,
+        responses={
+            201: TaskSerializer,
+            429: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description="Organization reached its PostHog Desktop usage limit",
+            ),
+        },
+    )
     def create(self, request, **kwargs):
         serializer = self._write_serializer(request.data, serializer_class=TaskCreateSerializer)
         # Read before create_task, which pops the relationship out of the dict it's handed.
         relationship = serializer.validated_data.get("signal_report_task_relationship")
-        task = tasks_facade.create_task(
-            self.team_id,
-            self._user_id(),
-            validated_data=dict(serializer.validated_data),
-            client_provenance=get_task_client_provenance(request),
-        )
+        try:
+            task = tasks_facade.create_task(
+                self.team_id,
+                self._user_id(),
+                validated_data=dict(serializer.validated_data),
+                client_provenance=get_task_client_provenance(request),
+            )
+        except tasks_facade.ComputeBillingLimitError:
+            return compute_quota_limit_response()
         self._forward_signals_discussion_note(request, task, relationship)
         return Response(TaskSerializer(task).data, status=status.HTTP_201_CREATED)
 
@@ -1744,6 +1760,10 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                 description="Invalid command or no active sandbox",
             ),
             404: OpenApiResponse(description="Task run not found"),
+            429: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description="Organization reached its PostHog Desktop usage limit",
+            ),
             502: OpenApiResponse(response=TaskRunErrorResponseSerializer, description="Agent server unreachable"),
         },
         summary="Send command to task run",
@@ -1815,16 +1835,7 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                     steer=command_params.get("steer", False),
                 )
             except tasks_facade.ComputeBillingLimitError:
-                return Response(
-                    TaskRunErrorResponseSerializer(
-                        {
-                            "type": "billing_limit",
-                            "code": "posthog_code_billing_limit_exceeded",
-                            "error": "Your organization reached its PostHog Desktop usage limit.",
-                        }
-                    ).data,
-                    status=status.HTTP_429_TOO_MANY_REQUESTS,
-                )
+                return compute_quota_limit_response()
             except Exception:
                 # A synchronous web request can't retry the way the Temporal
                 # follow-up path does, so a transient signalling failure surfaces

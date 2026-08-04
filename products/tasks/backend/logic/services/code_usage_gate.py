@@ -13,6 +13,7 @@ from posthog.temporal.oauth import create_oauth_access_token_for_user
 from posthog.utils import get_instance_region
 
 from products.tasks.backend.access import has_tasks_access
+from products.tasks.backend.logic.services.compute_quota import COMPUTE_QUOTA_DENIAL_CODE
 from products.tasks.backend.metrics import observe_code_usage_gate_check
 from products.tasks.backend.presentation.serializers import TaskRunErrorResponseSerializer
 
@@ -149,6 +150,19 @@ def code_access_required_response(user) -> Response | None:
             }
         ).data,
         status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def compute_quota_limit_response() -> Response:
+    return Response(
+        TaskRunErrorResponseSerializer(
+            {
+                "type": "billing_limit",
+                "code": COMPUTE_QUOTA_DENIAL_CODE,
+                "error": "Your organization reached its PostHog Desktop usage limit.",
+            }
+        ).data,
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
     )
 
 
