@@ -79,7 +79,11 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline
     S3BatchWriter,
 )
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline_v3.s3.writer import ParquetCompression
-from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import (
+    ResumableSourceManager,
+    ResumePlan,
+    resolve_resume_plan,
+)
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import (
     ResumableData,
     SourceResponse,
@@ -99,7 +103,7 @@ class PipelineV3(Generic[ResumableData]):
     _is_incremental: bool
     _reset_pipeline: bool
     _delta_table_helper: DeltaTableHelper
-    _resumable_source_manager: ResumableSourceManager[ResumableData] | None
+    _resume_plan: ResumePlan[ResumableData] | None
     _internal_schema: HogQLSchema
     _cdp_producer: CDPProducer
     _batcher: Batcher
@@ -187,7 +191,8 @@ class PipelineV3(Generic[ResumableData]):
         self._uses_delta_write_column_selection = source_uses_delta_write_column_selection(source.source_type)
         self._observed_columns: dict[str, dict[str, Any]] = {}
 
-        is_resume = resumable_source_manager is not None and resumable_source_manager.can_resume()
+        self._resume_plan = resolve_resume_plan(resumable_source_manager, self._resource)
+        is_resume = self._resume_plan is not None and self._resume_plan.manager.can_resume()
 
         self._pg_producer = PostgresProducer(
             database_url=WAREHOUSE_SOURCES_DATABASE_URL,
@@ -211,7 +216,6 @@ class PipelineV3(Generic[ResumableData]):
             workflow_run_id=current_workflow_run_id(),
         )
 
-        self._resumable_source_manager = resumable_source_manager
         # A source can shrink the batcher chunk (e.g. document sources with large rows) so the
         # source->Arrow conversion doesn't materialise an oversized table; None falls back to defaults.
         self._batcher = Batcher(
@@ -244,10 +248,10 @@ class PipelineV3(Generic[ResumableData]):
     async def run(self) -> PipelineResult:
         pa_memory_pool = pa.default_memory_pool()
 
-        should_resume = self._resumable_source_manager is not None and self._resumable_source_manager.can_resume()
-        # A resumable-source class whose current run can't actually resume (e.g. a SQL full load with
-        # no orderable primary key) reports `supports_resume=False`, so it's treated as non-resumable.
-        source_is_resumable = self._resumable_source_manager is not None and self._resource.supports_resume
+        # `_resume_plan` is None when this run can't resume at all; `can_resume` is the separate
+        # question of whether a checkpoint from an earlier attempt is actually there to resume from.
+        source_is_resumable = self._resume_plan is not None
+        should_resume = self._resume_plan is not None and self._resume_plan.manager.can_resume()
 
         if should_resume:
             await self._logger.ainfo("V3 Pipeline: Resumable source detected - attempting to resume previous import")
@@ -378,8 +382,8 @@ class PipelineV3(Generic[ResumableData]):
 
             # Load walked to completion — drop the keyset checkpoint so the next scheduled sync starts
             # fresh instead of resuming mid-table. No-op for non-keyset runs.
-            if self._resource.resume_keyset_column is not None and self._resumable_source_manager is not None:
-                await asyncio.to_thread(self._resumable_source_manager.clear_state)
+            if self._resume_plan is not None:
+                await asyncio.to_thread(self._resume_plan.clear_pipeline_checkpoint)
 
             return {
                 "should_trigger_cdp_producer": await self._cdp_producer.should_produce_table(),
@@ -480,9 +484,7 @@ class PipelineV3(Generic[ResumableData]):
         )
 
         # Keyset-resumable full loads checkpoint the committed max PK so a fresh pod resumes here.
-        await persist_keyset_resume_state(
-            self._resumable_source_manager, self._resource.resume_keyset_column, pa_table, self._logger
-        )
+        await persist_keyset_resume_state(self._resume_plan, pa_table, self._logger)
 
         await update_row_tracking_after_batch(
             str(self._job.id), self._job.team_id, self._schema.id, pa_table.num_rows, self._logger

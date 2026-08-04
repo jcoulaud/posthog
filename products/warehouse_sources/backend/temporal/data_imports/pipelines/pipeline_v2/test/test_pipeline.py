@@ -23,7 +23,7 @@ async def test_run_cleanup_failure_does_not_mask_import_error(monkeypatch):
     # stopping. The body error must propagate; the cleanup error must be swallowed.
     pipeline = PipelineNonDLT.__new__(PipelineNonDLT)
     pipeline._logger = AsyncMock()
-    pipeline._resumable_source_manager = None
+    pipeline._resume_plan = None
     pipeline._cdp_producer = cast(CDPProducer, object())  # unused: the patched clear-chunks ignores it
     pipeline._resource = cast(SourceResponse, object())
     pipeline._delta_table_helper = AsyncMock()

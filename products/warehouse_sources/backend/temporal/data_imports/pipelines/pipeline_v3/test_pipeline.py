@@ -38,7 +38,7 @@ def _make_pipeline() -> PipelineV3:
     pipeline._is_incremental = False
     pipeline._reset_pipeline = False
     pipeline._delta_table_helper = MagicMock(is_first_sync=True)
-    pipeline._resumable_source_manager = None
+    pipeline._resume_plan = None
     pipeline._internal_schema = MagicMock()
     pipeline._cdp_producer = MagicMock()
     pipeline._person_property_sink = MagicMock(should_stage=AsyncMock(return_value=False))
