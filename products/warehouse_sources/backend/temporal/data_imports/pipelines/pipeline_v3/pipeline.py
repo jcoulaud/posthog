@@ -32,7 +32,6 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.common.e
     finalize_desc_sort_incremental_value,
     handle_corrupted_delta_log,
     handle_reset_or_full_refresh,
-    persist_keyset_resume_state,
     persist_primary_keys,
     person_property_sink_clear_chunks,
     reset_rows_synced_if_needed,
@@ -380,11 +379,6 @@ class PipelineV3(Generic[ResumableData]):
 
             await self._finalize(row_count=row_count)
 
-            # Load walked to completion — drop the keyset checkpoint so the next scheduled sync starts
-            # fresh instead of resuming mid-table. No-op for non-keyset runs.
-            if self._resume_plan is not None:
-                await asyncio.to_thread(self._resume_plan.clear_pipeline_checkpoint)
-
             return {
                 "should_trigger_cdp_producer": await self._cdp_producer.should_produce_table(),
                 "consumer_manages_job_status": len(self._batch_results) > 0,
@@ -482,9 +476,6 @@ class PipelineV3(Generic[ResumableData]):
             log_prefix="V3 Pipeline: ",
             staging_run_uuid=self._s3_batch_writer.get_run_uuid(),
         )
-
-        # Keyset-resumable full loads checkpoint the committed max PK so a fresh pod resumes here.
-        await persist_keyset_resume_state(self._resume_plan, pa_table, self._logger)
 
         await update_row_tracking_after_batch(
             str(self._job.id), self._job.team_id, self._schema.id, pa_table.num_rows, self._logger

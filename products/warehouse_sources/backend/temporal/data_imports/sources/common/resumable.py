@@ -118,23 +118,12 @@ class ResumePlan(Generic[ResumableData]):
     """How *this run* resumes, resolved once so no call site re-derives it.
 
     Existing only when the run is genuinely resumable: the source class supplied a manager **and**
-    the response reported `supports_resume`. `keyset_column` set means the pipeline owns the
-    checkpoint (it saves the max key of each committed chunk); `None` means the source checkpoints
-    itself through the manager as it walks, and the pipeline only needs to know resume is cheap.
+    the response reported `supports_resume`. Sources own their checkpoints — saving as they walk and
+    clearing once they finish — so the pipeline only needs to know whether resume is cheap, plus the
+    manager to ask whether an earlier attempt left anything behind.
     """
 
     manager: ResumableSourceManager[ResumableData]
-    keyset_column: str | None = None
-
-    def clear_pipeline_checkpoint(self) -> None:
-        """Drop the keyset checkpoint after a completed walk, so the next sync starts from the top.
-
-        No-op when the source owns its own state — it clears that itself once it has walked to
-        completion, and the pipeline can't know where that is.
-        """
-        if self.keyset_column is None:
-            return
-        self.manager.clear_state()
 
 
 def resolve_resume_plan(
@@ -149,4 +138,4 @@ def resolve_resume_plan(
     """
     if manager is None or not resource.supports_resume:
         return None
-    return ResumePlan(manager=manager, keyset_column=resource.resume_keyset_column)
+    return ResumePlan(manager=manager)

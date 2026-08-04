@@ -1478,6 +1478,9 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
                             column_names = [column[0] for column in cursor.description or []]
                             return table_from_iterator((dict(zip(column_names, row)) for row in rows), arrow_schema)
 
+                    def _checkpoint(last_key: Any) -> None:
+                        manager.save_state(KeysetResumeState(last_key=last_key))
+
                     yield from iter_keyset_pages(
                         builder=_QUERY_BUILDER,
                         schema=schema,
@@ -1486,10 +1489,15 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
                         chunk_size=chunk_size,
                         run_page=_run_page,
                         initial_last_value=initial_last_value,
+                        checkpoint=_checkpoint,
                         enabled_columns=enabled_columns,
                         primary_keys=primary_keys,
                         row_filters=row_filters,
                     )
+
+                # Only reached when the walk exhausted the table. An abandoned generator (draining
+                # worker) unwinds at the yield above, leaving the checkpoint in place to resume from.
+                manager.clear_state()
 
             return SourceResponse(
                 name=location.response_name,
@@ -1497,7 +1505,6 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
                 primary_keys=primary_keys,
                 rows_to_sync=rows_to_sync,
                 supports_resume=True,
-                resume_keyset_column=keyset_column,
             )
 
         def _stream_with_optional_force_index(force_index_name: str | None) -> Iterator[Any]:

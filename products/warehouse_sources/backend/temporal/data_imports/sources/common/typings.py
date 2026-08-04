@@ -82,10 +82,6 @@ class SourceResponse:
     incremental watermark). Gated by the pipeline together with a non-None resumable-source manager,
     so a resumable-source class whose current table isn't actually resumable (e.g. a SQL full load
     with no orderable primary key) sets this False and is treated as non-resumable for shutdown."""
-    resume_keyset_column: Optional[str] = None
-    """For a keyset-resumable full SQL load: the single orderable primary-key column the load pages
-    on. The pipeline persists the max value of this column per committed chunk to the resumable-source
-    manager, so a fresh pod resumes from `WHERE <col> > <checkpoint>`. See `common/sql/keyset.py`."""
 
 
 @dataclasses.dataclass

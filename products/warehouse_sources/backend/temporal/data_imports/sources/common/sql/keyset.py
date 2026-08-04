@@ -6,10 +6,11 @@ restart — if the worker drains mid-stream the load starts over from row 0.
 
 Keyset pagination makes the load resumable without migrating a live cursor: order by a stable,
 unique, orderable key (the primary key) and read in bounded batches with
-``... WHERE pk > :last_key ORDER BY pk ASC LIMIT :n``. After each committed batch we checkpoint the
-last key seen (via `ResumableSourceManager`), so a fresh pod resumes from that key instead of the
-start. Each batch is an independent short query — run with autocommit so no read view or metadata
-lock is held across the whole load — so the read can also yield to a draining worker between batches.
+``... WHERE pk > :last_key ORDER BY pk ASC LIMIT :n``. Once the consumer takes a page the source
+checkpoints its last key (via `ResumableSourceManager`, like every other resumable source), so a
+fresh pod resumes from that key instead of the start. Each batch is an independent short query — run
+with autocommit so no read view or metadata lock is held across the whole load — so the read can also
+yield to a draining worker between batches.
 
 Eligibility is deliberately narrow (see `resolve_keyset_eligibility`): exactly one primary-key column
 of an orderable type. Composite keys (per-dialect row-value comparison) and keyless tables stay on the
@@ -112,6 +113,7 @@ def iter_keyset_pages(
     chunk_size: int,
     run_page: Callable[[SafeSQL], pa.Table | None],
     initial_last_value: Any | None,
+    checkpoint: Callable[[Any], None] | None = None,
     enabled_columns: list[str] | None = None,
     primary_keys: list[str] | None = None,
     row_filters: list[ValidatedRowFilter] | None = None,
@@ -125,8 +127,10 @@ def iter_keyset_pages(
     to start at the beginning). Pagination advances on the last (largest) key of each page; a short
     page ends the walk.
 
-    This iterator does not persist checkpoints — the pipeline does that after each chunk is durably
-    written (see `extract.persist_keyset_resume_state`), so a resume never skips uncommitted rows.
+    `checkpoint` records the last key of a page once the consumer has come back for the next one.
+    Generator laziness is what makes that the right moment: the call happens after the consumer has
+    taken the page, not when it was read, so an abandoned walk leaves the checkpoint on the last page
+    the consumer actually received rather than one the source had merely queued up.
     """
     last_value = initial_last_value
     while True:
@@ -147,5 +151,7 @@ def iter_keyset_pages(
         yield table
 
         last_value = table.column(keyset_column)[-1].as_py()
+        if checkpoint is not None:
+            checkpoint(last_value)
         if table.num_rows < chunk_size:
             break

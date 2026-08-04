@@ -11,6 +11,7 @@ from sshtunnel import BaseSSHTunnelForwarderError
 from posthog.schema import SourceFieldInputConfig
 
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql import SafeSQL, Table, TableStats
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.keyset import KeysetResumeState
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.predicates import (
     ColumnTypeCategory,
     ValidatedRowFilter,
@@ -825,19 +826,28 @@ class TestKeysetReadPath:
         return mock_connect, cursor, plan_check
 
     @staticmethod
-    def _drain_keyset(manager):
+    def _keyset_source(manager):
         source = MySQLImplementation().build_pipeline(_make_config(), _make_inputs(), resumable_source_manager=manager)
-        assert source.resume_keyset_column == "id"
+        assert source.supports_resume is True
+        return source
+
+    @classmethod
+    def _drain_keyset(cls, manager):
+        source = cls._keyset_source(manager)
         return list(source.items())  # type: ignore[arg-type]  # MySQL source is always sync
+
+    @staticmethod
+    def _fake_manager():
+        manager = MagicMock()
+        manager.can_resume.return_value = False
+        return manager
 
     def test_pages_read_with_autocommit(self, keyset_mocks):
         # Without autocommit every page shares one read view, so the load holds undo history and a
         # metadata lock on the source for its whole duration — the thing keyset paging exists to avoid.
         mock_connect, _, _ = keyset_mocks
-        manager = MagicMock()
-        manager.can_resume.return_value = False
 
-        self._drain_keyset(manager)
+        self._drain_keyset(self._fake_manager())
 
         read_connects = [call for call in mock_connect.call_args_list if call.kwargs.get("autocommit")]
         assert len(read_connects) == 1
@@ -845,14 +855,45 @@ class TestKeysetReadPath:
     def test_plan_is_checked_on_the_first_seeking_page(self, keyset_mocks):
         # Page 1 has no `pk >` predicate, so its plan says nothing about how the walk behaves.
         _, _, plan_check = keyset_mocks
-        manager = MagicMock()
-        manager.can_resume.return_value = False
 
-        self._drain_keyset(manager)
+        self._drain_keyset(self._fake_manager())
 
         assert plan_check.call_count == 1
         checked_sql = plan_check.call_args.args[1]
         assert "keyset_value" in checked_sql.params
+
+    def test_checkpoints_each_page_and_clears_once_the_table_is_walked(self, keyset_mocks):
+        manager = self._fake_manager()
+
+        self._drain_keyset(manager)
+
+        assert [call.args[0].last_key for call in manager.save_state.call_args_list] == [2, 3]
+        # The walk finished, so the next scheduled sync must start from the top, not mid-table.
+        manager.clear_state.assert_called_once()
+
+    def test_abandoned_walk_keeps_its_checkpoint(self, keyset_mocks):
+        # A draining worker stops consuming mid-table: the checkpoint has to survive so the next pod
+        # resumes from it instead of restarting the load from row 0.
+        manager = self._fake_manager()
+        items = self._keyset_source(manager).items()
+
+        next(items)  # type: ignore[arg-type]  # MySQL source is always sync
+        next(items)  # type: ignore[arg-type]
+        items.close()  # type: ignore[union-attr]
+
+        assert manager.save_state.call_count == 1
+        manager.clear_state.assert_not_called()
+
+    def test_resumes_from_the_persisted_checkpoint(self, keyset_mocks):
+        manager = self._fake_manager()
+        manager.can_resume.return_value = True
+        manager.load_state.return_value = KeysetResumeState(last_key=7)
+
+        self._drain_keyset(manager)
+
+        _, cursor, _ = keyset_mocks
+        first_page_params = cursor.execute.call_args_list[0].args[1]
+        assert first_page_params["keyset_value"] == 7
 
 
 class TestBuildPipelineSourceLocation:

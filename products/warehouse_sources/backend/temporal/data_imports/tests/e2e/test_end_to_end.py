@@ -4255,11 +4255,15 @@ async def test_mysql_keyset_resume_seeks_past_checkpoint(team, mysql_config, mys
 
             ids = await sync_to_async(_collect_ids)()
 
+        # The source walked the table to the end, so it drops its own checkpoint — the next
+        # scheduled sync starts from the top rather than resuming past row 7.
+        walked_to_completion = not await sync_to_async(manager.can_resume)()
+
         await sync_to_async(manager.clear_state)()
 
     assert ids == [4, 5, 6, 7]  # rows 1..3 (<= checkpoint) are never re-read; 4..7 arrive once, in order
     assert source_response.supports_resume is True
-    assert source_response.resume_keyset_column == "id"
+    assert walked_to_completion
 
 
 @pytest.mark.django_db(transaction=True)

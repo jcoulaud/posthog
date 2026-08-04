@@ -1,11 +1,9 @@
-import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from django.conf import settings
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import posthoganalytics
 from structlog.typing import FilteringBoundLogger
 from temporalio import activity
@@ -33,8 +31,6 @@ from products.warehouse_sources.backend.temporal.data_imports.row_tracking impor
     increment_rows,
     will_hit_billing_limit,
 )
-from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumePlan
-from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.keyset import KeysetResumeState
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.metadata import (
     extract_available_column_names,
 )
@@ -587,38 +583,6 @@ async def update_incremental_field_values(
                     )
 
     return last_incremental_field_value, earliest_incremental_field_value
-
-
-async def persist_keyset_resume_state(
-    # The pipeline is generic over its resume-data type, so the plan carries a manager typed for that
-    # generic. A plan only carries a `keyset_column` for loads whose manager stores
-    # `KeysetResumeState` — so writing that state below is safe at runtime.
-    resume_plan: ResumePlan[Any] | None,
-    pa_table: pa.Table,
-    logger: FilteringBoundLogger,
-) -> None:
-    """Checkpoint keyset progress after a chunk has been durably written.
-
-    Saves the largest primary-key value in the just-committed chunk, so a fresh pod resumes the full
-    load from ``WHERE <col> > <value>``. Persisting only committed chunks (never the source's read-ahead
-    pages) is what makes resume safe: the checkpoint can't run past what we've written, so a restart
-    never skips rows the previous pod read but hadn't yet persisted.
-
-    No-op unless the pipeline owns the checkpoint for this run (see `ResumePlan`).
-    """
-    if resume_plan is None or resume_plan.keyset_column is None:
-        return
-
-    keyset_column = resume_plan.keyset_column
-    if pa_table.num_rows == 0 or keyset_column not in pa_table.column_names:
-        return
-
-    last_key = pc.max(pa_table.column(keyset_column)).as_py()
-    if last_key is None:
-        return
-
-    await asyncio.to_thread(resume_plan.manager.save_state, KeysetResumeState(last_key=last_key))
-    await logger.adebug(f"Keyset checkpoint persisted: {keyset_column} <= {last_key}")
 
 
 async def update_row_tracking_after_batch(

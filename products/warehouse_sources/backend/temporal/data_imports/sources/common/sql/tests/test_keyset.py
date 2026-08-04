@@ -169,3 +169,45 @@ def test_iter_keyset_pages_full_page_then_empty_terminates():
     seen = [v.as_py() for table in tables for v in table.column("id")]
     assert seen == [1, 2, 3, 4]
     assert len(pages.queries) == 3  # [>none], [>2], [>4 -> empty]
+
+
+def test_checkpoint_records_each_page_only_once_the_consumer_takes_the_next():
+    # Generator laziness is the contract: a page that has been read but not yet handed on must not
+    # move the checkpoint, or an abandoned walk would resume past rows the consumer never saw.
+    pages = _FakePages(all_ids=[1, 2, 3, 4, 5], chunk_size=2)
+    saved: list[int] = []
+    walk = iter_keyset_pages(
+        builder=_BUILDER,
+        schema="db",
+        table_name="t",
+        keyset_column="id",
+        chunk_size=2,
+        run_page=pages.run_page,
+        initial_last_value=None,
+        checkpoint=saved.append,
+    )
+
+    next(walk)
+    assert saved == []  # first page read, consumer hasn't come back for more
+
+    next(walk)
+    assert saved == [2]  # ...and now it has
+
+    assert [v.as_py() for table in walk for v in table.column("id")] == [5]
+    assert saved == [2, 4, 5]
+
+
+def test_checkpoint_is_optional():
+    pages = _FakePages(all_ids=[1, 2], chunk_size=5)
+    tables = list(
+        iter_keyset_pages(
+            builder=_BUILDER,
+            schema="db",
+            table_name="t",
+            keyset_column="id",
+            chunk_size=5,
+            run_page=pages.run_page,
+            initial_last_value=None,
+        )
+    )
+    assert [t.num_rows for t in tables] == [2]
