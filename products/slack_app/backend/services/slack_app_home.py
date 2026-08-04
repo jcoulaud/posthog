@@ -38,6 +38,7 @@ from products.slack_app.backend.services.model_catalogue import (
     available_model_choices,
     format_model_id,
     label_for,
+    provider_for_model,
 )
 from products.slack_app.backend.services.run_preferences import SLACK_DEFAULT_MODEL, describe_run_model
 from products.slack_app.backend.services.slack_settings import (
@@ -374,7 +375,7 @@ def _active_model_blocks(effective: AIPreferences, source: PreferenceSource) -> 
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"Defaulting to {format_model_id(SLACK_DEFAULT_MODEL, owned_by='')}. "
+                        f"Defaulting to {format_model_id(SLACK_DEFAULT_MODEL, owned_by=provider_for_model(SLACK_DEFAULT_MODEL))}. "
                         "Pick personal or workspace settings to override."
                     ),
                 },
