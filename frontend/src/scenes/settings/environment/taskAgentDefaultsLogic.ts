@@ -8,8 +8,8 @@ import { taskRunDefaultsLogic } from 'products/posthog_ai/frontend/logics/taskRu
 import {
     tasksConfigCreate,
     tasksConfigList,
-    tasksMyConfigCreate,
-    tasksMyConfigList,
+    tasksMeConfigCreate,
+    tasksMeConfigList,
 } from 'products/tasks/frontend/generated/api'
 import type {
     RuntimeAdapterEnumApi,
@@ -204,12 +204,12 @@ export const taskAgentDefaultsLogic = kea<taskAgentDefaultsLogicType>([
                 if (values.currentProjectId == null) {
                     return null
                 }
-                return await tasksMyConfigList(String(values.currentProjectId))
+                return await tasksMeConfigList(String(values.currentProjectId))
             },
             saveMyPreferences: async (
                 preferences: TasksAIRunPreferencesApi
             ): Promise<TasksUserConfigResponseApi | null> => {
-                const response = await tasksMyConfigCreate(String(values.currentProjectId), preferences)
+                const response = await tasksMeConfigCreate(String(values.currentProjectId), preferences)
                 lemonToast.success('Your preference saved')
                 return response
             },

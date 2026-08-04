@@ -3,7 +3,7 @@ import { loaders } from 'kea-loaders'
 
 import { projectLogic } from 'scenes/projectLogic'
 
-import { tasksMyConfigList } from 'products/tasks/frontend/generated/api'
+import { tasksMeConfigList } from 'products/tasks/frontend/generated/api'
 import type {
     TasksResolvedAIRunDefaultsApi,
     TasksUserConfigResponseApi,
@@ -75,7 +75,7 @@ export const taskRunDefaultsLogic = kea<taskRunDefaultsLogicType>([
                     return null
                 }
                 try {
-                    return await tasksMyConfigList(String(values.currentProjectId))
+                    return await tasksMeConfigList(String(values.currentProjectId))
                 } catch {
                     // Defaults are a nicety — a failed fetch (missing scope, transient error) must never
                     // break the composer, which falls back to its built-in defaults.

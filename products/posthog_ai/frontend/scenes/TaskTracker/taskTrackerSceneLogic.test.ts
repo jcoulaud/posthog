@@ -58,7 +58,7 @@ describe('taskTrackerSceneLogic', () => {
             get: {
                 '/api/projects/:team/tasks/': { results: [], count: 0 },
                 '/api/projects/:team/tasks/repositories/': { repositories: [] },
-                '/api/projects/:team/tasks/my_config/': myConfigResponse(null),
+                '/api/projects/:team/tasks/@me/config/': myConfigResponse(null),
                 '/api/environments/:team/integrations/': { results: [] },
             },
             post: {
@@ -205,7 +205,7 @@ describe('taskTrackerSceneLogic', () => {
             expectModel: 'claude-opus-4-8',
         },
     ])('$description', async ({ resolved, pick, expectModel }) => {
-        useMocks({ get: { '/api/projects/:team/tasks/my_config/': myConfigResponse(resolved) } })
+        useMocks({ get: { '/api/projects/:team/tasks/@me/config/': myConfigResponse(resolved) } })
         logic.mount()
         await expectLogic(logic).toFinishAllListeners()
 

@@ -117,7 +117,7 @@ import type {
     TasksAIRunPreferencesApi,
     TasksConfigListParams,
     TasksListParams,
-    TasksMyConfigListParams,
+    TasksMeConfigListParams,
     TasksRepositoryReadinessRetrieveParams,
     TasksRunsListParams,
     TasksRunsSessionLogsRetrieveParams,
@@ -2227,6 +2227,56 @@ export const tasksThreadMessagesSendToAgentCreate = async (
     })
 }
 
+export const getTasksMeConfigListUrl = (projectId: string, params?: TasksMeConfigListParams) => {
+    const normalizedParams = new URLSearchParams()
+
+    Object.entries(params || {}).forEach(([key, value]) => {
+        if (value !== undefined) {
+            normalizedParams.append(key, value === null ? 'null' : String(value))
+        }
+    })
+
+    const stringifiedParams = normalizedParams.toString()
+
+    return stringifiedParams.length > 0
+        ? `/api/projects/${projectId}/tasks/@me/config/?${stringifiedParams}`
+        : `/api/projects/${projectId}/tasks/@me/config/`
+}
+
+/**
+ * Retrieve your per-project default AI run preferences, plus the resolved defaults a new run will use when no explicit runtime selection is sent (your preference over the project default).
+ */
+export const tasksMeConfigList = async (
+    projectId: string,
+    params?: TasksMeConfigListParams,
+    options?: RequestInit
+): Promise<TasksUserConfigResponseApi> => {
+    return apiMutator<TasksUserConfigResponseApi>(getTasksMeConfigListUrl(projectId, params), {
+        ...options,
+        method: 'GET',
+    })
+}
+
+export const getTasksMeConfigCreateUrl = (projectId: string) => {
+    return `/api/projects/${projectId}/tasks/@me/config/`
+}
+
+/**
+ * Set your per-project default AI run preferences; they override the project default wholesale. Send all fields as null to clear and inherit the project default.
+ */
+export const tasksMeConfigCreate = async (
+    projectId: string,
+    tasksAIRunPreferencesApi?: TasksAIRunPreferencesApi,
+    options?: RequestInit
+): Promise<TasksUserConfigResponseApi> => {
+    return apiMutator<TasksUserConfigResponseApi>(getTasksMeConfigCreateUrl(projectId), {
+        ...options,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...options?.headers },
+        body: JSON.stringify(tasksAIRunPreferencesApi),
+    })
+}
+
 export const getTasksActiveWizardRunRetrieveUrl = (projectId: string) => {
     return `/api/projects/${projectId}/tasks/active_wizard_run/`
 }
@@ -2288,56 +2338,6 @@ export const tasksConfigCreate = async (
     options?: RequestInit
 ): Promise<TasksTeamConfigResponseApi> => {
     return apiMutator<TasksTeamConfigResponseApi>(getTasksConfigCreateUrl(projectId), {
-        ...options,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...options?.headers },
-        body: JSON.stringify(tasksAIRunPreferencesApi),
-    })
-}
-
-export const getTasksMyConfigListUrl = (projectId: string, params?: TasksMyConfigListParams) => {
-    const normalizedParams = new URLSearchParams()
-
-    Object.entries(params || {}).forEach(([key, value]) => {
-        if (value !== undefined) {
-            normalizedParams.append(key, value === null ? 'null' : String(value))
-        }
-    })
-
-    const stringifiedParams = normalizedParams.toString()
-
-    return stringifiedParams.length > 0
-        ? `/api/projects/${projectId}/tasks/my_config/?${stringifiedParams}`
-        : `/api/projects/${projectId}/tasks/my_config/`
-}
-
-/**
- * Retrieve your per-project default AI run preferences, plus the resolved defaults a new run will use when no explicit runtime selection is sent (your preference over the project default).
- */
-export const tasksMyConfigList = async (
-    projectId: string,
-    params?: TasksMyConfigListParams,
-    options?: RequestInit
-): Promise<TasksUserConfigResponseApi> => {
-    return apiMutator<TasksUserConfigResponseApi>(getTasksMyConfigListUrl(projectId, params), {
-        ...options,
-        method: 'GET',
-    })
-}
-
-export const getTasksMyConfigCreateUrl = (projectId: string) => {
-    return `/api/projects/${projectId}/tasks/my_config/`
-}
-
-/**
- * Set your per-project default AI run preferences; they override the project default wholesale. Send all fields as null to clear and inherit the project default.
- */
-export const tasksMyConfigCreate = async (
-    projectId: string,
-    tasksAIRunPreferencesApi?: TasksAIRunPreferencesApi,
-    options?: RequestInit
-): Promise<TasksUserConfigResponseApi> => {
-    return apiMutator<TasksUserConfigResponseApi>(getTasksMyConfigCreateUrl(projectId), {
         ...options,
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...options?.headers },

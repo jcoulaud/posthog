@@ -232,17 +232,17 @@ class TestTasksConfigAPI(APIBaseTest):
         response = self.client.post(f"/api/projects/{self.team.id}/tasks/config/", payload)
         assert response.status_code == 400
 
-    def test_my_config_resolved_defaults_reflect_precedence(self):
+    def test_me_config_resolved_defaults_reflect_precedence(self):
         self.client.post(f"/api/projects/{self.team.id}/tasks/config/", TEAM_TRIPLE)
 
-        response = self.client.get(f"/api/projects/{self.team.id}/tasks/my_config/")
+        response = self.client.get(f"/api/projects/{self.team.id}/tasks/@me/config/")
         assert response.status_code == 200
         body = response.json()
         assert body["ai_run_preferences"] == {}
         assert body["resolved_ai_run_defaults"]["source"] == "team"
         assert body["resolved_ai_run_defaults"]["model"] == "claude-opus-4-8"
 
-        response = self.client.post(f"/api/projects/{self.team.id}/tasks/my_config/", USER_TRIPLE)
+        response = self.client.post(f"/api/projects/{self.team.id}/tasks/@me/config/", USER_TRIPLE)
         assert response.status_code == 200
         body = response.json()
         assert body["ai_run_preferences"] == USER_TRIPLE
@@ -250,7 +250,7 @@ class TestTasksConfigAPI(APIBaseTest):
         assert body["resolved_ai_run_defaults"]["model"] == "gpt-5.5"
 
         response = self.client.post(
-            f"/api/projects/{self.team.id}/tasks/my_config/",
+            f"/api/projects/{self.team.id}/tasks/@me/config/",
             {"runtime_adapter": None, "model": None, "reasoning_effort": None},
         )
         assert response.status_code == 200
@@ -258,10 +258,10 @@ class TestTasksConfigAPI(APIBaseTest):
         assert body["ai_run_preferences"] == {}
         assert body["resolved_ai_run_defaults"]["source"] == "team"
 
-    def test_my_config_is_scoped_to_the_requesting_user(self):
+    def test_me_config_is_scoped_to_the_requesting_user(self):
         other = User.objects.create_and_join(self.organization, "other@posthog.com", None)
         UserTasksConfig.objects.for_team(self.team.id).update_or_create(
             team_id=self.team.id, user_id=other.id, defaults={"ai_run_preferences": USER_TRIPLE}
         )
-        response = self.client.get(f"/api/projects/{self.team.id}/tasks/my_config/")
+        response = self.client.get(f"/api/projects/{self.team.id}/tasks/@me/config/")
         assert response.json()["ai_run_preferences"] == {}

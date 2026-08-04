@@ -3418,24 +3418,6 @@ export interface TaskThreadMessageWriteApi {
 }
 
 /**
- * The team's active onboarding wizard cloud run, used to rehydrate
- * the setup-progress FAB when the run was started server-side (drop flow).
- */
-export interface WizardCloudRunDTOApi {
-    /** Id of the onboarding wizard task. */
-    task_id: string
-    /** Id of the task's latest run, for reconnecting to its progress stream. */
-    run_id: string
-    /** Latest run status (e.g. queued, in_progress, completed, failed). */
-    status: string
-    /**
-     * When the run was created, for the FAB's elapsed timer.
-     * @nullable
-     */
-    started_at?: string | null
-}
-
-/**
  * The default AI run triple stored at team or user level.
  *
  * Write payload for the tasks config endpoints and the `ai_run_preferences` block of
@@ -3462,14 +3444,6 @@ export interface TasksAIRunPreferencesApi {
      * * `max` - max
      * * `ultracode` - ultracode */
     reasoning_effort?: ReasoningEffortEnumApi | null
-}
-
-/**
- * Team-level tasks configuration.
- */
-export interface TasksTeamConfigResponseApi {
-    /** Project-wide default AI run triple; empty object when unset. */
-    ai_run_preferences: TasksAIRunPreferencesApi
 }
 
 /**
@@ -3522,6 +3496,32 @@ export interface TasksUserConfigResponseApi {
     ai_run_preferences: TasksAIRunPreferencesApi
     /** The defaults a new run will use when no explicit runtime selection is sent. */
     resolved_ai_run_defaults: TasksResolvedAIRunDefaultsApi
+}
+
+/**
+ * The team's active onboarding wizard cloud run, used to rehydrate
+ * the setup-progress FAB when the run was started server-side (drop flow).
+ */
+export interface WizardCloudRunDTOApi {
+    /** Id of the onboarding wizard task. */
+    task_id: string
+    /** Id of the task's latest run, for reconnecting to its progress stream. */
+    run_id: string
+    /** Latest run status (e.g. queued, in_progress, completed, failed). */
+    status: string
+    /**
+     * When the run was created, for the FAB's elapsed timer.
+     * @nullable
+     */
+    started_at?: string | null
+}
+
+/**
+ * Team-level tasks configuration.
+ */
+export interface TasksTeamConfigResponseApi {
+    /** Project-wide default AI run triple; empty object when unset. */
+    ai_run_preferences: TasksAIRunPreferencesApi
 }
 
 export interface PinnedTaskIdsResponseApi {
@@ -4187,7 +4187,7 @@ export type TasksThreadMessagesListParams = {
     offset?: number
 }
 
-export type TasksConfigListParams = {
+export type TasksMeConfigListParams = {
     /**
      * Number of results to return per page.
      */
@@ -4198,7 +4198,7 @@ export type TasksConfigListParams = {
     offset?: number
 }
 
-export type TasksMyConfigListParams = {
+export type TasksConfigListParams = {
     /**
      * Number of results to return per page.
      */

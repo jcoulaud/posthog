@@ -3016,9 +3016,9 @@ export const TasksThreadMessagesSendToAgentCreateBody = /* @__PURE__ */ zod
     .describe("Response shape for one message in a task's thread.")
 
 /**
- * Set the project-wide default AI run preferences applied to task runs created without an explicit runtime selection. Send all fields as null to clear.
+ * Set your per-project default AI run preferences; they override the project default wholesale. Send all fields as null to clear and inherit the project default.
  */
-export const TasksConfigCreateBody = /* @__PURE__ */ zod
+export const TasksMeConfigCreateBody = /* @__PURE__ */ zod
     .object({
         runtime_adapter: zod
             .union([zod.enum(['claude', 'codex']).describe('\* `claude` - claude\n\* `codex` - codex'), zod.null()])
@@ -3049,9 +3049,9 @@ export const TasksConfigCreateBody = /* @__PURE__ */ zod
     )
 
 /**
- * Set your per-project default AI run preferences; they override the project default wholesale. Send all fields as null to clear and inherit the project default.
+ * Set the project-wide default AI run preferences applied to task runs created without an explicit runtime selection. Send all fields as null to clear.
  */
-export const TasksMyConfigCreateBody = /* @__PURE__ */ zod
+export const TasksConfigCreateBody = /* @__PURE__ */ zod
     .object({
         runtime_adapter: zod
             .union([zod.enum(['claude', 'codex']).describe('\* `claude` - claude\n\* `codex` - codex'), zod.null()])

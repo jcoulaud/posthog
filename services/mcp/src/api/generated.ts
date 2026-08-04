@@ -84987,7 +84987,7 @@ export namespace Schemas {
     offset?: number;
     };
 
-    export type TasksConfigListParams = {
+    export type TasksMeConfigListParams = {
     /**
      * Number of results to return per page.
      */
@@ -84998,7 +84998,7 @@ export namespace Schemas {
     offset?: number;
     };
 
-    export type TasksMyConfigListParams = {
+    export type TasksConfigListParams = {
     /**
      * Number of results to return per page.
      */

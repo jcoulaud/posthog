@@ -100,6 +100,8 @@ class TasksUserConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         return Response({"ai_run_preferences": preferences, "resolved_ai_run_defaults": asdict(resolved)})
 
     @extend_schema(
+        # `@me` is not identifier-safe, so the URL-derived default operationId is rejected.
+        operation_id="tasks_me_config_list",
         responses={200: TasksUserConfigResponseSerializer},
         description=(
             "Retrieve your per-project default AI run preferences, plus the resolved defaults "
@@ -111,6 +113,7 @@ class TasksUserConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         return self._response(request, ai_run_defaults.get_user_ai_run_preferences(self.team_id, _user_id(request)))
 
     @extend_schema(
+        operation_id="tasks_me_config_create",
         request=TasksAIRunPreferencesSerializer,
         responses={200: TasksUserConfigResponseSerializer},
         description=(
