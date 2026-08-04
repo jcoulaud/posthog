@@ -418,6 +418,7 @@ the row lists both.
 | news_api                         | HTTP                        | requests                                                        | ✅                          |
 | newsdata                         | HTTP                        | requests                                                        | ✅                          |
 | npm_registry                     | HTTP                        | requests                                                        | ✅                          |
+| octolens                         | HTTP (POST body cursor)     | requests + `rest_source.RESTClient`                             | ✅                          |
 | okta                             | HTTP                        | requests                                                        | ✅                          |
 | nocrm                            | HTTP                        | requests                                                        | ✅                          |
 | northflank                       | HTTP                        | requests                                                        | ✅                          |
@@ -1156,7 +1157,6 @@ doesn't conflict with concurrent PRs.
 - nuntly
 - nutshell
 - nylas
-- octolens
 - odoo
 - oecd
 - okendo
