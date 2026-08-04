@@ -113,6 +113,9 @@ class EndpointConfig:
     # Entity endpoints that return every row in one payload and reject bookmark pagination.
     supports_pagination: bool = True
     should_sync_default: bool = True
+    # Endpoints that address a single resource by id and return that object directly, not an
+    # `items` list. Fetched once and adapted into a one-row response.
+    returns_single_object: bool = False
 
 
 PINTEREST_ADS_CONFIG: dict[str, EndpointConfig] = {
@@ -151,6 +154,8 @@ PINTEREST_ADS_CONFIG: dict[str, EndpointConfig] = {
         partition_mode="datetime",
         partition_format="week",
         endpoint_type=EndpointType.ENTITY,
+        supports_pagination=False,
+        returns_single_object=True,
     ),
     "audiences": EndpointConfig(
         name="audiences",
@@ -239,9 +244,9 @@ ENTITY_ENDPOINT_PATHS: dict[str, str] = {
     "campaigns": "/ad_accounts/{ad_account_id}/campaigns",
     "ad_groups": "/ad_accounts/{ad_account_id}/ad_groups",
     "ads": "/ad_accounts/{ad_account_id}/ads",
-    # No `{ad_account_id}` placeholder: this lists every ad account the connected user can reach,
-    # which is what carries the currency and time zone that spend figures are reported in.
-    "ad_accounts": "/ad_accounts",
+    # Scoped to the configured account so the source only ever imports metadata for the advertiser
+    # it was created for, not every account the OAuth token can reach.
+    "ad_accounts": "/ad_accounts/{ad_account_id}",
     "audiences": "/ad_accounts/{ad_account_id}/audiences",
     "conversion_tags": "/ad_accounts/{ad_account_id}/conversion_tags",
     "keywords": "/ad_accounts/{ad_account_id}/keywords",

@@ -117,8 +117,8 @@ CANONICAL_DESCRIPTIONS: CanonicalDescriptions = {
         "columns": {"ad_id": "ID of the ad the metrics are for.", **_ANALYTICS_COLUMNS},
     },
     "ad_accounts": {
-        "description": "The Pinterest ad accounts the connected account can access, including the currency and time zone every spend figure is reported in.",
-        "docs_url": "https://developers.pinterest.com/docs/api/v5/ad_accounts-list/",
+        "description": "The configured Pinterest ad account, including the currency and time zone every spend figure is reported in.",
+        "docs_url": "https://developers.pinterest.com/docs/api/v5/ad_accounts-get/",
         "columns": {
             "id": "Unique identifier for the ad account.",
             "name": "The ad account's name.",

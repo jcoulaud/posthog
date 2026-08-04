@@ -935,10 +935,16 @@ class TestIterEntityRowsWithoutPagination:
     @mock.patch(
         "products.warehouse_sources.backend.temporal.data_imports.sources.pinterest_ads.pinterest_ads._make_request"
     )
-    def test_account_listing_needs_no_ad_account_id(self, mock_request):
-        # The ad accounts path has no `{ad_account_id}` placeholder — formatting it must stay a no-op.
-        mock_request.return_value = {"items": [{"id": "acc123", "currency": "EUR"}], "bookmark": None}
+    def test_account_endpoint_is_scoped_to_the_configured_account(self, mock_request):
+        # The ad accounts table must fetch only the configured account, not list every account the
+        # OAuth token can reach. The scoped endpoint returns the object directly, not an `items` list.
+        mock_request.return_value = {"id": "acc123", "currency": "EUR"}
 
-        list(_iter_entity_rows(mock.MagicMock(), "acc123", "ad_accounts", _make_resume_manager(), mock.MagicMock()))
+        yielded = list(
+            _iter_entity_rows(mock.MagicMock(), "acc123", "ad_accounts", _make_resume_manager(), mock.MagicMock())
+        )
 
-        assert mock_request.call_args.args[1] == "https://api.pinterest.com/v5/ad_accounts"
+        assert yielded == [[{"id": "acc123", "currency": "EUR"}]]
+        assert mock_request.call_count == 1
+        assert mock_request.call_args.args[1] == "https://api.pinterest.com/v5/ad_accounts/acc123"
+        assert mock_request.call_args.args[2] == {}

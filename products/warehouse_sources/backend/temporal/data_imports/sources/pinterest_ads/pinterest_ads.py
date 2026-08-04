@@ -139,7 +139,15 @@ def _iter_entity_rows(
 ) -> Iterator[list[dict[str, Any]]]:
     path = ENTITY_ENDPOINT_PATHS[endpoint].format(ad_account_id=ad_account_id)
     url = f"{BASE_URL}{path}"
-    supports_pagination = PINTEREST_ADS_CONFIG[endpoint].supports_pagination
+    endpoint_config = PINTEREST_ADS_CONFIG[endpoint]
+    supports_pagination = endpoint_config.supports_pagination
+
+    if endpoint_config.returns_single_object:
+        # The response is the resource itself, not an `items` list, so there's nothing to paginate.
+        data = _make_request(session, url, {})
+        if data:
+            yield [data]
+        return
 
     resume_config = _load_resume_config(resumable_source_manager, ENTITY_RESUME_KIND)
     bookmark: str | None = resume_config.bookmark if resume_config is not None else None
