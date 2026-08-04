@@ -576,7 +576,7 @@ def _personal_section_blocks(user_row: SlackSettings | None) -> list[dict]:
     """Personal AI override sub-card. Always editable by the user themselves."""
 
     has_override = bool(user_row and user_row.runtime_adapter and user_row.model)
-    summary = _row_summary(user_row) if has_override else "_No personal override — inheriting the workspace default._"
+    summary = _row_summary(user_row) if has_override else "_No personal override — inheriting the project default._"
 
     actions: list[dict] = [
         {
@@ -987,7 +987,7 @@ def handle_app_home_opened(event: dict, slack_team_id: str) -> None:
         return
 
     effective = resolve_ai_preferences(integration, slack_user_id)
-    user_row, _ = _load_rows(integration, slack_user_id)
+    user_row = _load_user_row(integration, slack_user_id)
 
     slack = SlackIntegration(integration)
     is_admin = _is_admin(slack, integration, slack_user_id)
@@ -1154,16 +1154,11 @@ def _get_slack_integration(slack_team_id: str) -> Integration | None:
     )
 
 
-def _load_rows(integration: Integration, slack_user_id: str) -> tuple[SlackSettings | None, SlackSettings | None]:
-    user_row = SlackSettings.objects.filter(
+def _load_user_row(integration: Integration, slack_user_id: str) -> SlackSettings | None:
+    return SlackSettings.objects.filter(
         slack_workspace_id=integration.integration_id,
         slack_user_id=slack_user_id,
     ).first()
-    workspace_row = SlackSettings.objects.filter(
-        slack_workspace_id=integration.integration_id,
-        slack_user_id__isnull=True,
-    ).first()
-    return user_row, workspace_row
 
 
 def _row_to_settings(row: SlackSettings | None) -> AIPreferences:
@@ -1189,7 +1184,7 @@ def _is_admin(slack: SlackIntegration, integration: Integration, slack_user_id: 
 
 
 def _open_edit_modal(integration: Integration, slack_user_id: str, *, trigger_id: str) -> None:
-    user_row, _ = _load_rows(integration, slack_user_id)
+    user_row = _load_user_row(integration, slack_user_id)
     current = _row_to_settings(user_row)
     supported = _supported_efforts(current.runtime_adapter, current.model)
     slack = SlackIntegration(integration)
@@ -1325,7 +1320,7 @@ def _republish_home(
     selected_status: str | None = None,
     page: int = 0,
 ) -> None:
-    user_row, _ = _load_rows(integration, slack_user_id)
+    user_row = _load_user_row(integration, slack_user_id)
     effective = resolve_ai_preferences(integration, slack_user_id)
     slack = SlackIntegration(integration)
     is_admin = _is_admin(slack, integration, slack_user_id)

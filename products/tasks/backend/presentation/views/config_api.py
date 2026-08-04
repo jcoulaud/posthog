@@ -49,11 +49,6 @@ class TasksTeamConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated, APIScopePermission]
     serializer_class = TasksTeamConfigResponseSerializer
 
-    def dangerously_get_required_scopes(self, request: Request, view) -> list[str] | None:
-        if request.method in ("GET", "HEAD", "OPTIONS"):
-            return ["task:read"]
-        return ["task:write"]
-
     @extend_schema(
         responses={200: TasksTeamConfigResponseSerializer},
         description="Retrieve the project-wide default AI run preferences for task runs.",
@@ -90,13 +85,10 @@ class TasksUserConfigViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated, APIScopePermission]
     serializer_class = TasksUserConfigResponseSerializer
 
-    def dangerously_get_required_scopes(self, request: Request, view) -> list[str] | None:
-        if request.method in ("GET", "HEAD", "OPTIONS"):
-            return ["task:read"]
-        return ["task:write"]
-
     def _response(self, request: Request, preferences: dict) -> Response:
-        resolved = ai_run_defaults.resolve_ai_run_defaults(self.team_id, _user_id(request))
+        resolved = ai_run_defaults.resolve_ai_run_defaults(
+            self.team_id, _user_id(request), user_preferences=preferences
+        )
         return Response({"ai_run_preferences": preferences, "resolved_ai_run_defaults": asdict(resolved)})
 
     @extend_schema(

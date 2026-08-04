@@ -103,75 +103,31 @@ def resolve_ai_preferences(integration: Integration, slack_user_id: str | None) 
     )
 
 
+# The Slack row stores the same triple as `UserTasksConfig`, so validation and packing
+# are the tasks product's rules — delegated rather than restated, or the two copies drift
+# every time the gateway gains an adapter or effort tier. Imported inside the functions to
+# keep the tasks stack off the slack_app import path, as elsewhere in this module.
+
+
 def _filter_unsupported_effort(runtime_adapter: str, model: str, effort: str) -> str | None:
-    """Drop a stored effort the resolved model no longer supports (e.g. user
-    saved `high` on a thinking model and then picked a non-thinking one)."""
+    from products.tasks.backend.facade.ai_run_defaults import filter_unsupported_effort  # noqa: PLC0415
 
-    from products.tasks.backend.facade.run_config import get_supported_reasoning_efforts
-
-    supported = {e.value for e in get_supported_reasoning_efforts(runtime_adapter, model)}
-    return effort if effort in supported else None
+    return filter_unsupported_effort(runtime_adapter, model, effort)
 
 
 def build_ai_preferences_payload(
-    runtime_adapter: str | None,
-    model: str | None,
-    reasoning_effort: str | None,
+    runtime_adapter: str | None, model: str | None, reasoning_effort: str | None
 ) -> dict[str, str]:
-    """Pack the triple into the JSON shape stored on `SlackSettings.ai_preferences`.
+    from products.tasks.backend.facade.ai_run_defaults import build_ai_run_preferences_payload  # noqa: PLC0415
 
-    Drops keys whose value is `None` so callers can distinguish "intentionally
-    cleared" (key absent) from "set to falsy value".
-    """
-    payload = {
-        "runtime_adapter": runtime_adapter,
-        "model": model,
-        "reasoning_effort": reasoning_effort,
-    }
-    return {k: v for k, v in payload.items() if v}
+    return build_ai_run_preferences_payload(runtime_adapter, model, reasoning_effort)
 
 
-def validate_ai_preferences(
-    runtime_adapter: str | None,
-    model: str | None,
-    reasoning_effort: str | None,
-) -> None:
-    """Validate the `(runtime_adapter, model, reasoning_effort)` triple.
+def validate_ai_preferences(runtime_adapter: str | None, model: str | None, reasoning_effort: str | None) -> None:
+    """Raises `django.core.exceptions.ValidationError` if the triple is inconsistent."""
+    from products.tasks.backend.facade.ai_run_defaults import validate_ai_run_preferences  # noqa: PLC0415
 
-    Raises `django.core.exceptions.ValidationError` if the triple is internally
-    inconsistent. Call this from the write path so half-set rows never reach
-    the DB.
-    """
-    from django.core.exceptions import ValidationError
-
-    from products.tasks.backend.facade.run_config import (
-        PUBLIC_REASONING_EFFORTS,
-        RuntimeAdapter,
-        get_reasoning_effort_error,
-    )
-
-    if (runtime_adapter is None) != (model is None):
-        raise ValidationError(
-            "runtime_adapter and model must be set together — set both to override the default, or both to null to inherit."
-        )
-
-    if runtime_adapter is not None:
-        valid_adapters = {a.value for a in RuntimeAdapter}
-        if runtime_adapter not in valid_adapters:
-            raise ValidationError(
-                f"Unknown runtime_adapter '{runtime_adapter}'. Valid: {', '.join(sorted(valid_adapters))}."
-            )
-
-    if reasoning_effort is not None:
-        valid_efforts = {e.value for e in PUBLIC_REASONING_EFFORTS}
-        if reasoning_effort not in valid_efforts:
-            raise ValidationError(
-                f"Unknown reasoning_effort '{reasoning_effort}'. Valid: {', '.join(sorted(valid_efforts))}."
-            )
-
-    error = get_reasoning_effort_error(runtime_adapter, model, reasoning_effort)
-    if error:
-        raise ValidationError(error)
+    validate_ai_run_preferences(runtime_adapter, model, reasoning_effort)
 
 
 __all__ = [

@@ -1,4 +1,4 @@
-import { MakeLogicType, actions, connect, events, kea, key, listeners, path, props, reducers } from 'kea'
+import { MakeLogicType, actions, connect, events, kea, key, listeners, path, props, reducers, selectors } from 'kea'
 import { router, urlToAction } from 'kea-router'
 
 import { lemonToast } from '@posthog/lemon-ui'
@@ -90,7 +90,10 @@ export interface taskTrackerSceneLogicValues {
     tasks: Task[] // tasksLogic
     activeSuggestionGroup: SuggestionGroup | null
     consentBlocked: boolean
+    displayEffort: ReasoningEffortEnumApi
+    displayModel: string
     headline: string
+    isDefaultSelection: boolean
     isSubmittingTask: boolean
     newTaskData: TaskCreateForm
     persistedRepositoryConfig: PersistedRepositoryConfig
@@ -411,6 +414,31 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
         ],
     }),
 
+    selectors({
+        // The pickers render these and a submit sends exactly these, so the composer can never
+        // show one model or effort while the run launches with another.
+        displayModel: [
+            (s) => [s.newTaskData, s.claudeDefaultModel],
+            (newTaskData: TaskCreateForm, claudeDefaultModel: string | null): string =>
+                newTaskData.model ?? claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL,
+        ],
+        displayEffort: [
+            (s) => [s.newTaskData, s.claudeDefaultEffort, s.displayModel],
+            (
+                newTaskData: TaskCreateForm,
+                claudeDefaultEffort: string | null,
+                displayModel: string
+            ): ReasoningEffortEnumApi =>
+                resolveEffortForModel(newTaskData.reasoningEffort ?? claudeDefaultEffort, displayModel),
+        ],
+        // Neither picker touched: submit omits the triple so the backend resolves it, which also
+        // lets a warm run provisioned under the default match.
+        isDefaultSelection: [
+            (s) => [s.newTaskData],
+            (newTaskData: TaskCreateForm): boolean => !newTaskData.model && !newTaskData.reasoningEffort,
+        ],
+    }),
+
     listeners(({ actions, values, cache, props }) => ({
         // Release the manually-mounted optimistic stream once the create resolves (navigated to the real run)
         // or fails (returned to the composer), so the throwaway draft instance never leaks.
@@ -473,7 +501,7 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
                 return
             }
 
-            const { description, repositoryConfig, model, reasoningEffort, permissionMode } = values.newTaskData
+            const { description, repositoryConfig, permissionMode } = values.newTaskData
 
             if (!description.trim()) {
                 lemonToast.error('Description is required')
@@ -513,28 +541,18 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
                 const projectId = String(values.currentProjectId)
                 const newTask = await tasksCreate(projectId, taskData)
 
-                // The runtime selection for this run. Touching either picker pins the displayed
-                // selection explicitly, for this run only (the form resets to null after submit).
-                // Untouched with a Claude server default available, the selection is omitted entirely so
-                // the backend applies the user/project default (this also lets warm runs match). With no
-                // default either, the built-in composer model is pinned, preserving pre-defaults behavior.
-                let runtimeSelection: ClaudeTaskRunCreateSchemaApi | Record<string, never>
-                if (model || reasoningEffort) {
-                    const pinnedModel = model ?? values.claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL
-                    runtimeSelection = {
-                        runtime_adapter: ClaudeRuntimeAdapterEnumApi.Claude,
-                        model: pinnedModel,
-                        reasoning_effort: resolveEffortForModel(reasoningEffort, pinnedModel),
-                    }
-                } else if (values.claudeDefaultModel) {
-                    runtimeSelection = {}
-                } else {
-                    runtimeSelection = {
-                        runtime_adapter: ClaudeRuntimeAdapterEnumApi.Claude,
-                        model: DEFAULT_COMPOSER_MODEL,
-                        reasoning_effort: resolveEffortForModel(null, DEFAULT_COMPOSER_MODEL),
-                    }
-                }
+                // Omitted only when nothing is pinned AND a server default exists, so the backend
+                // resolves it (which also lets warm runs match). Otherwise send the displayed
+                // selection — with no default anywhere that's the built-in model, preserving
+                // pre-defaults behavior.
+                const runtimeSelection: ClaudeTaskRunCreateSchemaApi | Record<string, never> =
+                    values.isDefaultSelection && values.claudeDefaultModel
+                        ? {}
+                        : {
+                              runtime_adapter: ClaudeRuntimeAdapterEnumApi.Claude,
+                              model: values.displayModel,
+                              reasoning_effort: values.displayEffort,
+                          }
 
                 // Auto-run the task after creation; the detail scene shows the latest run by default. The
                 // run checks out the chosen branch (server falls back to the repo's default branch if unset).

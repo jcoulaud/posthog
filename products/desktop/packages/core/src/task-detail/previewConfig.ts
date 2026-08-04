@@ -1,4 +1,5 @@
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { TaskRunDefaults } from "@posthog/api-client/posthog-client";
 import { flattenConfigValues } from "@posthog/core/task-detail/configOptions";
 import type { Adapter } from "@posthog/shared";
 import { EFFORT_LEVELS } from "@posthog/shared/domain-types";
@@ -132,11 +133,10 @@ export function deriveInitialConfig(
 }
 
 /** The subset of the tasks backend's resolved AI run defaults the composer acts on. */
-export interface PreferredRunDefaults {
-  runtime_adapter: string | null;
-  model: string | null;
-  reasoning_effort: string | null;
-}
+export type PreferredRunDefaults = Pick<
+  TaskRunDefaults,
+  "runtime_adapter" | "model" | "reasoning_effort"
+>;
 
 export interface PreferredRunSelection {
   model: string;

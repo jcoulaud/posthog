@@ -27,6 +27,7 @@ from typing import Any, Literal
 
 from django.core.exceptions import ValidationError
 
+from posthog.models.scoping import get_current_team_id
 from posthog.models.scoping.manager import resolve_effective_team_id
 from posthog.models.team.extensions import get_or_create_team_extension
 from posthog.models.team.team import Team
@@ -85,21 +86,65 @@ def resolve_ai_run_selection(
     )
 
 
-def resolve_ai_run_defaults(team_id: int, user_id: int | None) -> ResolvedAIRunConfig:
-    """The stored default AI run triple: the acting user's per-project preference wins
-    wholesale, then the project default, then empty."""
-    canonical_team_id = resolve_effective_team_id(team_id)
+def _canonical_team_id(team_id: int) -> int:
+    """`team_id` normalized to its project root, without a query when the caller's
+    scope already answers it.
 
-    if user_id is not None:
-        user_prefs = (
+    The request/activity scope holds a canonical id, so an id equal to it is itself
+    canonical and the `posthog_team` lookup is pure overhead — worth skipping on a
+    path that runs for every task-run creation.
+    """
+    if get_current_team_id() == team_id:
+        return team_id
+    return resolve_effective_team_id(team_id)
+
+
+def apply_ai_run_defaults(selection: dict, team_id: int, user_id: int | None) -> ResolvedAIRunConfig | None:
+    """Fill `selection`'s `(runtime_adapter, model, reasoning_effort)` keys in place from
+    the stored defaults, returning the config that applied — or `None` when the caller
+    pinned a selection or no level has one, leaving `selection` untouched.
+
+    The one place the injection rule lives. Callers that resolve early (warm-run matching
+    compares post-defaults triples) and `Task.create_run` as the safety net must agree
+    byte for byte, or a warm run stops matching the submit that activates it.
+    """
+    resolved = resolve_ai_run_selection(
+        team_id,
+        user_id,
+        runtime_adapter=selection.get("runtime_adapter"),
+        model=selection.get("model"),
+        reasoning_effort=selection.get("reasoning_effort"),
+    )
+    if resolved.source not in ("user", "team"):
+        return None
+    selection["runtime_adapter"] = resolved.runtime_adapter
+    selection["model"] = resolved.model
+    if resolved.reasoning_effort:
+        selection["reasoning_effort"] = resolved.reasoning_effort
+    return resolved
+
+
+def resolve_ai_run_defaults(
+    team_id: int, user_id: int | None, *, user_preferences: dict[str, Any] | None = None
+) -> ResolvedAIRunConfig:
+    """The stored default AI run triple: the acting user's per-project preference wins
+    wholesale, then the project default, then empty.
+
+    Callers holding the user's stored payload already (the `@me` config endpoint reads
+    it to echo back) pass it as `user_preferences` to skip re-reading the same row.
+    """
+    canonical_team_id = _canonical_team_id(team_id)
+
+    if user_preferences is None and user_id is not None:
+        user_preferences = (
             UserTasksConfig.objects.for_team(canonical_team_id, canonical=True)
             .filter(user_id=user_id)
             .values_list("ai_run_preferences", flat=True)
             .first()
         )
-        resolved = _resolve_from_preferences(user_prefs, source="user")
-        if resolved is not None:
-            return resolved
+    resolved = _resolve_from_preferences(user_preferences, source="user")
+    if resolved is not None:
+        return resolved
 
     team_prefs = (
         TeamTasksConfig.objects.filter(team_id=canonical_team_id).values_list("ai_run_preferences", flat=True).first()
@@ -128,7 +173,7 @@ def _resolve_from_preferences(
     if runtime_adapter not in {a.value for a in RuntimeAdapter}:
         return None
     if reasoning_effort is not None:
-        reasoning_effort = _filter_unsupported_effort(runtime_adapter, model, reasoning_effort)
+        reasoning_effort = filter_unsupported_effort(runtime_adapter, model, reasoning_effort)
 
     return ResolvedAIRunConfig(
         runtime_adapter=runtime_adapter,
@@ -138,7 +183,7 @@ def _resolve_from_preferences(
     )
 
 
-def _filter_unsupported_effort(runtime_adapter: str, model: str, effort: str) -> str | None:
+def filter_unsupported_effort(runtime_adapter: str, model: str, effort: str) -> str | None:
     """Drop a stored effort the resolved model no longer supports (e.g. saved
     `high` on a thinking model, then the preference's model changed)."""
     supported = {e.value for e in get_supported_reasoning_efforts(runtime_adapter, model)}
@@ -204,7 +249,7 @@ def build_ai_run_preferences_payload(
 def get_team_ai_run_preferences(team_id: int) -> dict[str, str]:
     """The stored team-level preference payload ({} when unset)."""
     prefs = (
-        TeamTasksConfig.objects.filter(team_id=resolve_effective_team_id(team_id))
+        TeamTasksConfig.objects.filter(team_id=_canonical_team_id(team_id))
         .values_list("ai_run_preferences", flat=True)
         .first()
     )
@@ -224,7 +269,7 @@ def update_team_ai_run_preferences(
     """
     validate_ai_run_preferences(runtime_adapter, model, reasoning_effort)
     payload = build_ai_run_preferences_payload(runtime_adapter, model, reasoning_effort)
-    team = Team.objects.get(id=resolve_effective_team_id(team_id))
+    team = Team.objects.get(id=_canonical_team_id(team_id))
     config = get_or_create_team_extension(team, TeamTasksConfig)
     config.ai_run_preferences = payload
     config.save(update_fields=["ai_run_preferences", "updated_at"])
@@ -233,7 +278,7 @@ def update_team_ai_run_preferences(
 
 def get_user_ai_run_preferences(team_id: int, user_id: int) -> dict[str, str]:
     """The stored per-(user, project) preference payload ({} when unset)."""
-    canonical_team_id = resolve_effective_team_id(team_id)
+    canonical_team_id = _canonical_team_id(team_id)
     prefs = (
         UserTasksConfig.objects.for_team(canonical_team_id, canonical=True)
         .filter(user_id=user_id)
@@ -256,7 +301,7 @@ def update_user_ai_run_preferences(
     """
     validate_ai_run_preferences(runtime_adapter, model, reasoning_effort)
     payload = build_ai_run_preferences_payload(runtime_adapter, model, reasoning_effort)
-    canonical_team_id = resolve_effective_team_id(team_id)
+    canonical_team_id = _canonical_team_id(team_id)
     # team_id repeated in the lookup kwargs: for_team() only filters reads — creation
     # needs the value passed explicitly.
     UserTasksConfig.objects.for_team(canonical_team_id, canonical=True).update_or_create(

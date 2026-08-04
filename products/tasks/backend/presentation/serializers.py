@@ -3335,6 +3335,9 @@ class TasksResolvedAIRunDefaultsSerializer(serializers.Serializer):
     """The AI run triple a new run will effectively use when the caller pins nothing,
     plus which preference level supplied it."""
 
+    # Not bound to `ResolvedAIRunConfig` via DataclassSerializer: that dataclass also carries the
+    # internal `explicit` resolution state this endpoint never returns, and its per-field defaults
+    # would mark every field optional when the response always sends all four.
     runtime_adapter = serializers.CharField(
         allow_null=True, help_text="Effective default runtime adapter, or null when no preference is stored."
     )

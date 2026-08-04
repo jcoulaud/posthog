@@ -6,6 +6,8 @@ from unittest.mock import patch
 from parameterized import parameterized
 
 from posthog.models import Integration, User
+from posthog.models.personal_api_key import PersonalAPIKey, hash_key_value
+from posthog.models.utils import generate_random_token_personal
 
 from products.tasks.backend.facade import api as facade
 from products.tasks.backend.logic.services.ai_run_defaults import (
@@ -265,3 +267,31 @@ class TestTasksConfigAPI(APIBaseTest):
         )
         response = self.client.get(f"/api/projects/{self.team.id}/tasks/@me/config/")
         assert response.json()["ai_run_preferences"] == {}
+
+
+class TestConfigEndpointScopes(APIBaseTest):
+    # Both endpoints rely on `scope_object = "task"` to derive their scopes rather than
+    # declaring them. PostHog Code reads them with a personal API key, so a change to
+    # the scope object or the action sets would silently lock it out — or hand a
+    # read-only key write access.
+    def _bearer(self, scopes: list[str]) -> str:
+        value = generate_random_token_personal()
+        PersonalAPIKey.objects.create(label="t", user=self.user, secure_value=hash_key_value(value), scopes=scopes)
+        self.client.logout()
+        return f"Bearer {value}"
+
+    @parameterized.expand(["config", "@me/config"])
+    def test_read_scope_reads_but_cannot_write(self, path: str):
+        bearer = self._bearer(["task:read"])
+        url = f"/api/projects/{self.team.id}/tasks/{path}/"
+        assert self.client.get(url, HTTP_AUTHORIZATION=bearer).status_code == 200
+        assert self.client.post(url, {}, HTTP_AUTHORIZATION=bearer).status_code == 403
+
+    @parameterized.expand(["config", "@me/config"])
+    def test_write_scope_writes(self, path: str):
+        response = self.client.post(
+            f"/api/projects/{self.team.id}/tasks/{path}/",
+            {"runtime_adapter": "claude", "model": "claude-opus-4-8", "reasoning_effort": "high"},
+            HTTP_AUTHORIZATION=self._bearer(["task:read", "task:write"]),
+        )
+        assert response.status_code == 200, response.content

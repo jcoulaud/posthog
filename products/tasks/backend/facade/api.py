@@ -4538,24 +4538,11 @@ def _with_ai_run_defaults(data: dict, *, team_id: int, acting_user_id: int | Non
     if internal:
         return data
     from products.tasks.backend.logic.services.ai_run_defaults import (  # noqa: PLC0415 — keep ORM-heavy logic services off the api import path
-        resolve_ai_run_selection,
+        apply_ai_run_defaults,
     )
 
-    resolved = resolve_ai_run_selection(
-        team_id,
-        acting_user_id,
-        runtime_adapter=data.get("runtime_adapter"),
-        model=data.get("model"),
-        reasoning_effort=data.get("reasoning_effort"),
-    )
-    if resolved.source not in ("user", "team"):
-        return data
     updated = dict(data)
-    updated["runtime_adapter"] = resolved.runtime_adapter
-    updated["model"] = resolved.model
-    if resolved.reasoning_effort:
-        updated["reasoning_effort"] = resolved.reasoning_effort
-    return updated
+    return updated if apply_ai_run_defaults(updated, team_id, acting_user_id) else data
 
 
 def _find_idling_warm_run(

@@ -3,7 +3,8 @@ import {
   type TaskRunDefaults,
 } from "@posthog/api-client/posthog-client";
 import { useAuthenticatedQuery } from "@posthog/ui/hooks/useAuthenticatedQuery";
-import { useAuthStateValue } from "../../auth/store";
+import { useRef } from "react";
+import { useAuthStateFetched, useAuthStateValue } from "../../auth/store";
 
 export interface TaskRunDefaultsResult {
   defaults: TaskRunDefaults;
@@ -21,14 +22,22 @@ export interface TaskRunDefaultsResult {
  */
 export function useTaskRunDefaults(): TaskRunDefaultsResult {
   const projectId = useAuthStateValue((state) => state.currentProjectId);
+  const authFetched = useAuthStateFetched();
   const query = useAuthenticatedQuery(
     ["task-run-defaults", projectId],
     async (client) => await client.getTaskRunDefaults(Number(projectId)),
     { enabled: projectId != null, staleTime: 5 * 60 * 1000, retry: false },
   );
 
+  // Monotonic: `projectId` only arrives once auth bootstraps, so a plain `projectId == null`
+  // arm would read settled, then unsettled, then settled — restarting whatever waits on it.
+  // Once true it stays true for the life of the hook.
+  const settledRef = useRef(false);
+  settledRef.current =
+    settledRef.current || query.isFetched || (authFetched && projectId == null);
+
   return {
     defaults: query.data ?? NO_TASK_RUN_DEFAULTS,
-    isSettled: projectId == null || query.isSuccess || query.isError,
+    isSettled: settledRef.current,
   };
 }

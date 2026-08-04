@@ -415,27 +415,17 @@ class Task(DeletedMetaFields, models.Model):
             return
 
         from products.tasks.backend.logic.services.ai_run_defaults import (  # noqa: PLC0415 — breaks the circular import with ai_run_defaults, which imports this module
-            resolve_ai_run_selection,
+            apply_ai_run_defaults,
         )
         from products.tasks.backend.temporal.process_task.utils import (  # noqa: PLC0415 — keeps temporalio off the import path (matches _build_task)
             RuntimeAdapter,
             get_provider_for_runtime_adapter,
         )
 
-        resolved = resolve_ai_run_selection(
-            self.team_id,
-            acting_user_id or self.created_by_id,
-            runtime_adapter=state.get("runtime_adapter"),
-            model=state.get("model"),
-            reasoning_effort=state.get("reasoning_effort"),
-        )
-        if resolved.source not in ("user", "team"):
+        resolved = apply_ai_run_defaults(state, self.team_id, acting_user_id or self.created_by_id)
+        if resolved is None:
             return
 
-        state["runtime_adapter"] = resolved.runtime_adapter
-        state["model"] = resolved.model
-        if resolved.reasoning_effort:
-            state["reasoning_effort"] = resolved.reasoning_effort
         provider = get_provider_for_runtime_adapter(resolved.runtime_adapter)
         if provider is not None:
             state["provider"] = provider.value

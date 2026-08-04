@@ -2,21 +2,22 @@ import { useActions, useValues } from 'kea'
 
 import { LemonButton, LemonSelect } from '@posthog/lemon-ui'
 
-import { getEffortsForModel } from 'products/posthog_ai/frontend/utils/composerModels'
+import {
+    COMPOSER_MODELS,
+    getEffortLabel,
+    getEffortsForModel,
+    getModelLabel,
+} from 'products/posthog_ai/frontend/utils/composerModels'
 
 import { type AIRunPreferenceDraft, taskAgentDefaultsLogic } from './taskAgentDefaultsLogic'
 
-// Mirrors the backend run-config registry (products/tasks/backend/temporal/process_task/utils.py);
-// extend when new models ship. Codex models are offered here because the default also applies to
-// surfaces that can run them (Slack, PostHog Code), even though the web tracker only drives Claude.
+// The Claude group comes from the composer's own list so a model you can pick for a run is
+// always settable as a default, and vice versa. Codex models are offered because the default
+// also applies to surfaces that can run them (Slack, PostHog Code) even though the web tracker
+// only drives Claude; they have no frontend registry yet, so they mirror the backend run-config
+// registry (products/tasks/backend/temporal/process_task/utils.py) by hand.
 const MODEL_OPTIONS = [
-    {
-        title: 'Claude',
-        options: [
-            { value: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-        ],
-    },
+    { title: 'Claude', options: COMPOSER_MODELS },
     {
         title: 'Codex',
         options: [
@@ -94,14 +95,14 @@ export function TaskAgentProjectDefaultSettings(): JSX.Element {
 }
 
 export function TaskAgentMyPreferenceSettings(): JSX.Element {
-    const { myDraft, myConfigLoading, resolvedDefaults } = useValues(taskAgentDefaultsLogic)
+    const { myDraft, myPreferencesLoading, resolvedDefaults } = useValues(taskAgentDefaultsLogic)
     const { setMyDraft, submitMyDraft } = useActions(taskAgentDefaultsLogic)
 
     return (
         <div className="flex flex-col gap-2">
             <PreferenceEditor
                 draft={myDraft}
-                saving={myConfigLoading}
+                saving={myPreferencesLoading}
                 inheritLabel="Use project default"
                 onChange={setMyDraft}
                 onSave={submitMyDraft}
@@ -109,9 +110,10 @@ export function TaskAgentMyPreferenceSettings(): JSX.Element {
             <p className="text-secondary mb-0">
                 {resolvedDefaults?.model ? (
                     <>
-                        Runs you start without picking a model will use <strong>{resolvedDefaults.model}</strong>
+                        Runs you start without picking a model will use{' '}
+                        <strong>{getModelLabel(resolvedDefaults.model)}</strong>
                         {resolvedDefaults.reasoning_effort ? (
-                            <> ({resolvedDefaults.reasoning_effort} effort)</>
+                            <> ({getEffortLabel(resolvedDefaults.reasoning_effort)} effort)</>
                         ) : null}{' '}
                         from the {resolvedDefaults.source === 'user' ? 'preference above' : 'project default'}.
                     </>
