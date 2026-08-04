@@ -14,7 +14,10 @@ import {
   latestFinishedCanvasBuild,
   publishedCanvasBuild,
 } from "@posthog/core/canvas/canvasBuildSchemas";
-import type { CanvasAnalyticsConfig } from "@posthog/core/canvas/freeformSchemas";
+import type {
+  CanvasAnalyticsConfig,
+  CanvasTextSelection,
+} from "@posthog/core/canvas/freeformSchemas";
 import { useHostTRPC } from "@posthog/host-router/react";
 import {
   Button,
@@ -66,6 +69,7 @@ import { CanvasBuildStatus } from "./CanvasBuildStatus";
 import { CanvasFramePlaceholder } from "./CanvasFramePlaceholder";
 import { CanvasGenerateHero } from "./CanvasGenerateHero";
 import { CanvasPermissionDialog } from "./CanvasPermissionDialog";
+import { CanvasSelectionCommentAction } from "./CanvasSelectionCommentAction";
 import { CanvasSidePanel } from "./CanvasSidePanel";
 import {
   canvasVersionNavigation,
@@ -99,6 +103,8 @@ export function FreeformCanvasView({
   // local bridge so the composer floats to the side immediately on submit,
   // before the canvas record's polled generationTaskId catches up.
   const [startedTaskId, setStartedTaskId] = useState<string | null>(null);
+  const [textSelection, setTextSelection] =
+    useState<CanvasTextSelection | null>(null);
   const collapsed = useCanvasChatPanelStore((s) => s.collapsed);
   const setCollapsed = useCanvasChatPanelStore((s) => s.setCollapsed);
   const panelWidth = useCanvasChatPanelStore((s) => s.width);
@@ -238,6 +244,10 @@ export function FreeformCanvasView({
   const { versions, isLoading: versionsLoading } = useCanvasVersions(
     interactive ? dashboardId : undefined,
   );
+  const commentTaskId =
+    effectiveTaskId ??
+    versions.find((version) => version.taskId)?.taskId ??
+    null;
 
   // Clear a browse that points at a version the history no longer contains
   // (e.g. it was pruned server-side while this canvas was open).
@@ -611,6 +621,7 @@ export function FreeformCanvasView({
                     onError={onError}
                     onRendered={onRendered}
                     onNavigate={onNavigate}
+                    onTextSelection={setTextSelection}
                   />
                 </Box>
               </Flex>
@@ -660,6 +671,7 @@ export function FreeformCanvasView({
                 onReady={onArtifactReady}
                 onRendered={onRendered}
                 onNavigate={onNavigate}
+                onTextSelection={setTextSelection}
               />
             </Box>
           ) : headCode ? (
@@ -676,6 +688,7 @@ export function FreeformCanvasView({
                 onError={onError}
                 onRendered={onRendered}
                 onNavigate={onNavigate}
+                onTextSelection={setTextSelection}
               />
             </Box>
           ) : (
@@ -735,6 +748,7 @@ export function FreeformCanvasView({
               heartbeat — stays alive and chat scroll survives a minimize. */}
           <CanvasSidePanel
             effectiveTaskId={effectiveTaskId}
+            commentTaskId={commentTaskId}
             onMinimize={() => {
               setCollapsed(true);
               setGeneratingPanelDismissed(true);
@@ -750,6 +764,14 @@ export function FreeformCanvasView({
           />
         </ResizableSidebar>
       )}
+
+      <CanvasSelectionCommentAction
+        selection={textSelection}
+        taskId={commentTaskId}
+        dashboardId={dashboardId}
+        canvasName={dashboard?.name ?? "Canvas"}
+        onDismiss={() => setTextSelection(null)}
+      />
 
       {/* The empty-canvas landing: a centered composer with suggestions,
           overlaying the canvas area. On submit it slides down; once it's gone
