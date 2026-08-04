@@ -103,7 +103,7 @@ from products.signals.backend.models import (
     SignalTeamConfig,
     SignalUserAutonomyConfig,
 )
-from products.signals.backend.quota import signals_quota_enforcement_enabled, signals_quota_gate
+from products.signals.backend.quota import self_driving_quota_enforcement_enabled, self_driving_quota_gate
 from products.signals.backend.report_generation.research import ActionabilityChoice
 from products.signals.backend.report_generation.resolve_reviewers import (
     get_org_member_github_login_to_user_map,
@@ -659,7 +659,7 @@ class SignalReportRefundSummaryResponseSerializer(serializers.Serializer):
     quota_limited = serializers.BooleanField(
         help_text=(
             "Whether autonomous PR generation is currently paused for this project because the "
-            "organization is over its signals credits quota. Read from the quota limiter, so it "
+            "organization is over its self-driving credits quota. Read from the quota limiter, so it "
             "reflects the same state the pipeline gates enforce."
         ),
     )
@@ -2145,7 +2145,7 @@ class SignalReportViewSet(
         # and quota enforcement (`quota_limited` drives the widget's paused banner, and enforcement
         # can roll out before refunds). Gating on refunds alone would hide the paused state for
         # enforcement-only orgs.
-        if not (self._signals_pr_refunds_enabled() or signals_quota_enforcement_enabled(self.team)):
+        if not (self._signals_pr_refunds_enabled() or self_driving_quota_enforcement_enabled(self.team)):
             raise NotFound("PR refunds are not enabled for this organization.")
 
         period_start, period_end = current_billing_period_bounds(self.organization)
@@ -2167,7 +2167,7 @@ class SignalReportViewSet(
                 "period_billable_credits": period_billable_credits_for_org(
                     self.organization.id, period_start, period_end
                 ),
-                "quota_limited": signals_quota_gate(self.team).enforced,
+                "quota_limited": self_driving_quota_gate(self.team).enforced,
             }
         )
 
