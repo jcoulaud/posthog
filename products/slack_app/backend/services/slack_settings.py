@@ -6,34 +6,35 @@ Key names mirror the task-run request serializer
 (`products/tasks/backend/presentation/serializers.py`) so the resolver output
 can be handed to the task layer with zero translation.
 
-Resolution: whole-triple swap, not field-by-field merge. If the user row
-carries the atomic `(runtime_adapter, model)` pair, the user's entire
-preference object takes over (including its absent `reasoning_effort`);
-otherwise we fall back wholesale to the workspace default. A field-by-field
-merge would blend mismatched configurations — for example, surfacing a
-workspace `reasoning_effort` of `low` alongside the user's non-thinking
-model — which is never what the user picked. `reasoning_effort` is still
-dropped if the resolved model doesn't support it, so a stale effort from
-a previous model choice can't silently stick. Unset keys stay `None` so the
-task layer applies its own defaults rather than duplicating them here.
+Only the per-user row carries AI preferences. A workspace-wide model is a
+project-level decision and lives in `TeamTasksConfig`, reachable from PostHog
+settings: a Slack workspace can route to several PostHog projects, so a
+workspace-keyed default can't say "Opus in project A, Sonnet in project B"
+even though every run lands in exactly one project.
+
+Resolution is a whole-triple swap, never a field-by-field merge — the row
+either sources the atomic `(runtime_adapter, model)` pair or contributes
+nothing. `reasoning_effort` is dropped if the model doesn't support it, so a
+stale effort from a previous model choice can't silently stick. Unset keys
+stay `None` so the task layer applies its own defaults rather than
+duplicating them here.
 
 Gated by the `slack-app-home` feature flag: when off the resolver returns
 the empty object, preserving pre-Home-tab behaviour for workspaces that
 haven't opted in.
 
 Layering with the tasks product's central defaults: the resolved triple is
-passed to task creation as explicit per-run values, so Slack preferences sit
-above the central per-user / per-team defaults (see
-`products.tasks.backend.facade.ai_run_defaults`). When both Slack rows are
-empty the task layer falls back to those central defaults on its own.
+passed to task creation as explicit per-run values, so a Slack user's own pick
+sits above the central per-user / per-team defaults (see
+`products.tasks.backend.facade.ai_run_defaults`) — the same rule PostHog Code
+applies to its device-local pick. With no personal row the task layer resolves
+those central defaults on its own.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
-from django.db.models import Q
 
 from products.slack_app.backend.feature_flags import is_slack_app_home_enabled
 
@@ -62,50 +63,32 @@ _EMPTY = AIPreferences()
 
 
 def resolve_ai_preferences(integration: Integration, slack_user_id: str | None) -> AIPreferences:
-    """Resolve the effective AI preferences for a Slack user in a workspace.
+    """Resolve this Slack user's own AI preference for a workspace.
 
-    Whole-triple swap: if the user row carries the atomic `(runtime_adapter,
-    model)` pair, the user's preference object wins outright; otherwise the
-    workspace row wins outright. We never blend the two. `reasoning_effort`
-    is dropped if the resolved model doesn't support it.
+    Empty unless the user's row carries the atomic `(runtime_adapter, model)`
+    pair; an empty result hands the decision to the tasks layer's project and
+    user defaults. `reasoning_effort` is dropped if the model doesn't support it.
     """
 
-    if not is_slack_app_home_enabled(integration):
+    if not is_slack_app_home_enabled(integration) or not slack_user_id:
         return _EMPTY
 
     from products.slack_app.backend.models import SlackSettings
 
-    slack_workspace_id = integration.integration_id
-    # SQL `IN (..., NULL)` does not match NULL rows, so the workspace-wide row
-    # (slack_user_id IS NULL) needs its own arm in the filter.
-    user_row_filter = Q(slack_user_id=slack_user_id) if slack_user_id else Q(pk__in=[])
-    rows = list(
-        SlackSettings.objects.filter(
-            Q(slack_workspace_id=slack_workspace_id) & (Q(slack_user_id__isnull=True) | user_row_filter)
-        ).values("slack_user_id", "ai_preferences")
+    # Pulled into a local dict so mypy can give it a definite type — the
+    # JSONField returns `Any | None`, and a `... or {}` expression ends up as a
+    # wider union mypy refuses to narrow.
+    stored = (
+        SlackSettings.objects.filter(slack_workspace_id=integration.integration_id, slack_user_id=slack_user_id)
+        .values_list("ai_preferences", flat=True)
+        .first()
     )
-    # Pulled into local dicts so mypy can give them a definite type — the
-    # JSONField returns `Any | None` per row, and a `next(...) or {}` expression
-    # ends up as a wider union mypy refuses to narrow.
-    user_prefs: dict[str, Any] = {}
-    workspace_prefs: dict[str, Any] = {}
-    for r in rows:
-        payload = r["ai_preferences"] or {}
-        if r["slack_user_id"] is None:
-            workspace_prefs = payload
-        elif slack_user_id is not None and r["slack_user_id"] == slack_user_id:
-            user_prefs = payload
+    user_prefs: dict[str, Any] = stored or {}
 
     # `validate_ai_preferences` enforces that `runtime_adapter` and `model` are
-    # set together, so the presence of either one is a faithful signal that
-    # this row has been explicitly configured. Pick the whole triple from
-    # whichever row sourced the pair.
-    if user_prefs.get("runtime_adapter") and user_prefs.get("model"):
-        chosen = user_prefs
-    elif workspace_prefs.get("runtime_adapter") and workspace_prefs.get("model"):
-        chosen = workspace_prefs
-    else:
-        chosen = {}
+    # set together, so the presence of either one is a faithful signal that this
+    # row has been explicitly configured.
+    chosen = user_prefs if user_prefs.get("runtime_adapter") and user_prefs.get("model") else {}
 
     runtime_adapter = chosen.get("runtime_adapter") or None
     model = chosen.get("model") or None
