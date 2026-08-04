@@ -1719,7 +1719,7 @@ class TaskActivitySerializer(DataclassSerializer):
         ),
     )
     snippet = serializers.CharField(
-        help_text="Content of the thread message tied to the latest activity; empty for task-creation rows."
+        help_text="Content of the thread message or resource comment tied to the latest activity."
     )
     is_unread = serializers.BooleanField(
         help_text="Whether the requester has yet to see this activity. Activity they caused themselves is never unread."
@@ -1738,6 +1738,9 @@ class TaskActivitySerializer(DataclassSerializer):
             "snippet",
             "latest_author",
             "latest_message_id",
+            "latest_comment_id",
+            "latest_comment_scope",
+            "latest_comment_item_id",
             "is_unread",
         ]
 
