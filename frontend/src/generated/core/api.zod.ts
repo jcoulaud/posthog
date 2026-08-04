@@ -348,7 +348,9 @@ export const OrganizationsProjectsCreateBody = /* @__PURE__ */ zod
             .min(1)
             .max(organizationsProjectsCreateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsCreateBodyProductDescriptionMax)
@@ -955,7 +957,9 @@ export const OrganizationsProjectsUpdateBody = /* @__PURE__ */ zod
             .min(1)
             .max(organizationsProjectsUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsUpdateBodyProductDescriptionMax)
@@ -1562,7 +1566,9 @@ export const OrganizationsProjectsPartialUpdateBody = /* @__PURE__ */ zod
             .min(1)
             .max(organizationsProjectsPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsPartialUpdateBodyProductDescriptionMax)
@@ -2171,7 +2177,9 @@ export const OrganizationsProjectsAddProductIntentPartialUpdateBody = /* @__PURE
             .min(1)
             .max(organizationsProjectsAddProductIntentPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsAddProductIntentPartialUpdateBodyProductDescriptionMax)
@@ -2794,7 +2802,9 @@ export const OrganizationsProjectsChangeOrganizationCreateBody = /* @__PURE__ */
             .min(1)
             .max(organizationsProjectsChangeOrganizationCreateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsChangeOrganizationCreateBodyProductDescriptionMax)
@@ -3408,7 +3418,9 @@ export const OrganizationsProjectsCompleteProductOnboardingPartialUpdateBody = /
             .min(1)
             .max(organizationsProjectsCompleteProductOnboardingPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsCompleteProductOnboardingPartialUpdateBodyProductDescriptionMax)
@@ -4045,7 +4057,9 @@ export const OrganizationsProjectsDefaultEvaluationContextsCreateBody = /* @__PU
             .min(1)
             .max(organizationsProjectsDefaultEvaluationContextsCreateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsDefaultEvaluationContextsCreateBodyProductDescriptionMax)
@@ -4669,7 +4683,9 @@ export const OrganizationsProjectsDefaultReleaseConditionsUpdateBody = /* @__PUR
             .min(1)
             .max(organizationsProjectsDefaultReleaseConditionsUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsDefaultReleaseConditionsUpdateBodyProductDescriptionMax)
@@ -5292,7 +5308,9 @@ export const OrganizationsProjectsDeleteSecretTokenBackupPartialUpdateBody = /* 
             .min(1)
             .max(organizationsProjectsDeleteSecretTokenBackupPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsDeleteSecretTokenBackupPartialUpdateBodyProductDescriptionMax)
@@ -5923,7 +5941,9 @@ export const OrganizationsProjectsExperimentsConfigPartialUpdateBody = /* @__PUR
             .min(1)
             .max(organizationsProjectsExperimentsConfigPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsExperimentsConfigPartialUpdateBodyProductDescriptionMax)
@@ -6545,7 +6565,9 @@ export const OrganizationsProjectsGenerateConversationsPublicTokenCreateBody = /
             .min(1)
             .max(organizationsProjectsGenerateConversationsPublicTokenCreateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsGenerateConversationsPublicTokenCreateBodyProductDescriptionMax)
@@ -7184,7 +7206,9 @@ export const OrganizationsProjectsLogsConfigPartialUpdateBody = /* @__PURE__ */ 
             .min(1)
             .max(organizationsProjectsLogsConfigPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsLogsConfigPartialUpdateBodyProductDescriptionMax)
@@ -7795,7 +7819,9 @@ export const OrganizationsProjectsResetTokenPartialUpdateBody = /* @__PURE__ */ 
             .min(1)
             .max(organizationsProjectsResetTokenPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsResetTokenPartialUpdateBodyProductDescriptionMax)
@@ -8406,7 +8432,9 @@ export const OrganizationsProjectsRotateSecretTokenPartialUpdateBody = /* @__PUR
             .min(1)
             .max(organizationsProjectsRotateSecretTokenPartialUpdateBodyNameMax)
             .optional()
-            .describe('Human-readable project name.'),
+            .describe(
+                'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+            ),
         product_description: zod
             .string()
             .max(organizationsProjectsRotateSecretTokenPartialUpdateBodyProductDescriptionMax)

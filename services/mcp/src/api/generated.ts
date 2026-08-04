@@ -54260,7 +54260,7 @@ export namespace Schemas {
       readonly id?: number;
       readonly organization?: string;
       /**
-         * Human-readable project name.
+         * Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.
          * @minLength 1
          * @maxLength 200
          */
@@ -58350,7 +58350,7 @@ export namespace Schemas {
       readonly id: number;
       readonly organization: string;
       /**
-         * Human-readable project name.
+         * Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.
          * @minLength 1
          * @maxLength 200
          */
