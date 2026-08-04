@@ -17,6 +17,8 @@ from unittest.mock import patch
 from posthog.models.integration import Integration
 from posthog.temporal.ai.slack_app.activities.task_creation import (
     _INITIATOR_PLACEHOLDER,
+    _SLACK_DEFAULT_MODEL,
+    _SLACK_DEFAULT_RUNTIME_ADAPTER,
     _SLACK_DELIVERY_CONSTRAINTS,
     _SLACK_DELIVERY_CONSTRAINTS_MESSAGE_ONLY,
     _SLACK_DELIVERY_CONSTRAINTS_TEXT_ONLY,
@@ -26,8 +28,11 @@ from posthog.temporal.ai.slack_app.activities.task_creation import (
     _canvas_file_delivery_available,
     _format_author_token,
     _indent_body,
+    _slack_run_selection,
     build_thread_context_update_block,
 )
+
+from products.slack_app.backend.services.slack_settings import AIPreferences
 
 
 def test_format_author_token_builds_labeled_mention():
@@ -495,3 +500,29 @@ class TestBuildThreadContextUpdateBlock:
         ]
         block, _ = build_thread_context_update_block(msgs, last_forwarded_ts="1.000", event_ts="2.000")
         assert block == snapshot
+
+
+# Pinning the bot's own model unconditionally is what made the project/user defaults
+# unreachable from Slack, and it fails silently — the run still works, just never on the
+# configured model. These lock the fall-through in both directions.
+@pytest.mark.parametrize(
+    "prefs,has_central_default,expected",
+    [
+        (
+            AIPreferences(runtime_adapter="claude", model="claude-sonnet-5", reasoning_effort="high"),
+            True,
+            ("claude", "claude-sonnet-5", "high"),
+        ),
+        (
+            AIPreferences(runtime_adapter="claude", model="claude-sonnet-5", reasoning_effort="high"),
+            False,
+            ("claude", "claude-sonnet-5", "high"),
+        ),
+        (AIPreferences(), True, (None, None, None)),
+        (AIPreferences(), False, (_SLACK_DEFAULT_RUNTIME_ADAPTER, _SLACK_DEFAULT_MODEL, None)),
+    ],
+)
+def test_slack_run_selection_defers_to_central_defaults_only_when_slack_pins_nothing(
+    prefs, has_central_default, expected
+):
+    assert _slack_run_selection(prefs, has_central_default) == expected

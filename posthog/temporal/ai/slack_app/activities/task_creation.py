@@ -1,7 +1,7 @@
 import re
 import uuid
 import textwrap
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.db import models
 
@@ -19,6 +19,9 @@ from posthog.temporal.ai.slack_app.helpers import block_if_team_over_quota, safe
 from posthog.temporal.ai.slack_app.types import PostHogCodeSlackMentionWorkflowInputs
 from posthog.temporal.common.utils import close_db_connections
 
+if TYPE_CHECKING:
+    from products.slack_app.backend.services.slack_settings import AIPreferences
+
 logger = structlog.get_logger(__name__)
 
 _RESUME_ERROR_MSG = "Sorry, I ran into an internal error restarting the agent. Please try again in a minute."
@@ -31,9 +34,9 @@ _SLACK_RECOVERY_STRATEGY_CANCELLED = "cancelled_resume"
 _THREAD_CONTEXT_TAG = "slack_thread_context"
 _THREAD_CONTEXT_UPDATE_TAG = "slack_thread_context_update"
 _INITIATOR_PLACEHOLDER = "<original user message was here>"
-# Default the Slack bot to Opus 5 when neither the user nor the workspace has
-# pinned a model, instead of letting the agent server fall back to its own
-# default. Kept together as a valid (runtime_adapter, model) pair.
+# The Slack bot's floor: used only when nothing is pinned in Slack and the project
+# has no default either, instead of letting the agent server pick its own. Kept
+# together as a valid (runtime_adapter, model) pair.
 _SLACK_DEFAULT_RUNTIME_ADAPTER = "claude"
 _SLACK_DEFAULT_MODEL = "claude-opus-5"
 _SLACK_DELIVERY_CONSTRAINTS = """Slack delivery constraints:
@@ -151,6 +154,26 @@ def _indent_body(text: str, indent: str = "  ") -> str:
     lines) gives the same rendering and removes a custom loop to reason about.
     """
     return textwrap.indent(text, indent)
+
+
+def _slack_run_selection(
+    ai_prefs: "AIPreferences", has_central_default: bool
+) -> tuple[str | None, str | None, str | None]:
+    """The runtime triple a Slack-initiated run pins, given the workspace/user Slack
+    preferences and whether the project carries a central default.
+
+    An empty triple is meaningful: it lets `Task.create_run` apply the project or user
+    default (and lets a warm run provisioned under that default still match). Pinning
+    the bot's own model unconditionally would make those defaults unreachable from
+    Slack, so the floor applies only when no level has a preference at all.
+    """
+    if ai_prefs.model:
+        # `resolve_ai_preferences` sets runtime_adapter and model together, so carrying
+        # both keeps the pair consistent.
+        return ai_prefs.runtime_adapter, ai_prefs.model, ai_prefs.reasoning_effort
+    if has_central_default:
+        return None, None, None
+    return _SLACK_DEFAULT_RUNTIME_ADAPTER, _SLACK_DEFAULT_MODEL, None
 
 
 def _with_slack_delivery_constraints(
@@ -638,14 +661,13 @@ def create_posthog_code_task_for_repo_activity(
     allow_pr_creation = True
 
     from products.slack_app.backend.facade.slack_settings import resolve_ai_preferences
+    from products.tasks.backend.facade import (  # noqa: PLC0415 — keep tasks deps off the slack_app import path
+        ai_run_defaults,
+    )
 
     ai_prefs = resolve_ai_preferences(integration, slack_user_id)
-
-    # `resolve_ai_preferences` guarantees runtime_adapter and model are set together,
-    # so falling back on both keeps the pair consistent — an explicit override wins,
-    # otherwise the Slack bot defaults to Opus 5.
-    runtime_adapter = ai_prefs.runtime_adapter or _SLACK_DEFAULT_RUNTIME_ADAPTER
-    model = ai_prefs.model or _SLACK_DEFAULT_MODEL
+    has_central_default = ai_run_defaults.resolve_ai_run_defaults(integration.team_id, user_id).source != "none"
+    runtime_adapter, model, reasoning_effort = _slack_run_selection(ai_prefs, has_central_default)
 
     # File into the creator's personal "#me" channel so the task surfaces in PostHog Desktop's
     # Spaces feed, which is strictly channel-scoped — a NULL-channel task shows up in no space.
@@ -677,7 +699,7 @@ def create_posthog_code_task_for_repo_activity(
             initial_permission_mode="bypassPermissions",
             runtime_adapter=runtime_adapter,
             model=model,
-            reasoning_effort=ai_prefs.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             channel_id=personal_channel_id,
         )
     except Exception as e:
