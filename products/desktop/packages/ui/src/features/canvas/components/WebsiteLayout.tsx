@@ -33,6 +33,7 @@ import {
   useDashboardEditStore,
   useIsDashboardEditing,
 } from "@posthog/ui/features/canvas/stores/dashboardEditStore";
+import { useFreeformThread } from "@posthog/ui/features/canvas/stores/freeformChatStore";
 import { copyCanvasLink } from "@posthog/ui/features/canvas/utils/copyCanvasLink";
 import { useCommentNavigationStore } from "@posthog/ui/features/sessions/commentNavigationStore";
 import { ArtifactDocumentCommentAction } from "@posthog/ui/features/sessions/components/ArtifactDocumentCommentAction";
@@ -201,6 +202,7 @@ function CanvasBreadcrumb({
   const { renameDashboard } = useDashboardMutations();
   const openComments = useCanvasChatPanelStore((state) => state.openComments);
   const name = dashboard?.name ?? "Canvas";
+  const { displayedVersionId } = useFreeformThread(`dashboard:${dashboardId}`);
 
   return (
     <ChannelBreadcrumb
@@ -221,6 +223,12 @@ function CanvasBreadcrumb({
             <ArtifactDocumentCommentAction
               target={{ scope: "desktop_canvas", itemId: dashboardId }}
               taskId={dashboard.generationTaskId}
+              context={{
+                anchor: { kind: "document" },
+                ...(displayedVersionId
+                  ? { canvasVersionId: displayedVersionId }
+                  : {}),
+              }}
               onCreated={(commentId) => {
                 openComments();
                 useCommentNavigationStore
