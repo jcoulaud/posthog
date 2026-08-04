@@ -8,12 +8,13 @@ Keyset pagination makes the load resumable without migrating a live cursor: orde
 unique, orderable key (the primary key) and read in bounded batches with
 ``... WHERE pk > :last_key ORDER BY pk ASC LIMIT :n``. After each committed batch we checkpoint the
 last key seen (via `ResumableSourceManager`), so a fresh pod resumes from that key instead of the
-start. Each batch is an independent short query, so the read can also yield to a draining worker
-between batches.
+start. Each batch is an independent short query — run with autocommit so no read view or metadata
+lock is held across the whole load — so the read can also yield to a draining worker between batches.
 
-Eligibility is deliberately narrow (see `keyset_resume_column`): exactly one primary-key column of
-an orderable type. Composite keys (per-dialect row-value comparison) and keyless tables stay on the
-single-cursor path.
+Eligibility is deliberately narrow (see `resolve_keyset_eligibility`): exactly one primary-key column
+of an orderable type. Composite keys (per-dialect row-value comparison) and keyless tables stay on the
+single-cursor path, and report why via `KeysetEligibility.reason` so the ineligible share is
+measurable before the approach is extended to other dialects.
 """
 
 from __future__ import annotations
@@ -58,34 +59,48 @@ def is_orderable_keyset_type(arrow_type: pa.DataType) -> bool:
     )
 
 
-def keyset_resume_column(
+@dataclasses.dataclass(frozen=True)
+class KeysetEligibility:
+    """Whether this run can keyset-resume, and if not, why.
+
+    `column` is the primary-key column to seek on, or `None` when the run falls back to the
+    single-cursor stream. `reason` is a stable token (never free text) so the ineligible share can be
+    counted per dialect from logs — that rate is what decides whether extending keyset pagination to
+    another SQL source is worth the work.
+    """
+
+    column: str | None = None
+    reason: str | None = None
+
+
+def resolve_keyset_eligibility(
     *,
     primary_keys: list[str] | None,
     arrow_schema: pa.Schema,
     should_use_incremental_field: bool,
-) -> str | None:
-    """Return the single primary-key column a full load can keyset-resume on, or `None`.
+) -> KeysetEligibility:
+    """Decide whether a full load can keyset-resume, and on which primary-key column.
 
     Eligible only when all of:
     - the sync is a full load (incremental syncs already resume from their persisted watermark);
     - the table has exactly one detected primary-key column (composite keys need per-dialect
       row-value comparison — out of scope here); and
     - that column is present in the projected Arrow schema with an orderable type.
-
-    `None` means "not keyset-eligible" — the caller falls back to the single-cursor stream.
     """
     if should_use_incremental_field:
-        return None
-    if not primary_keys or len(primary_keys) != 1:
-        return None
+        return KeysetEligibility(reason="incremental_sync")
+    if not primary_keys:
+        return KeysetEligibility(reason="no_primary_key")
+    if len(primary_keys) != 1:
+        return KeysetEligibility(reason="composite_primary_key")
 
     key = primary_keys[0]
     field = arrow_schema.field(key) if key in arrow_schema.names else None
     if field is None:
-        return None
+        return KeysetEligibility(reason="primary_key_not_projected")
     if not is_orderable_keyset_type(field.type):
-        return None
-    return key
+        return KeysetEligibility(reason=f"non_orderable_type:{field.type}")
+    return KeysetEligibility(column=key)
 
 
 def iter_keyset_pages(

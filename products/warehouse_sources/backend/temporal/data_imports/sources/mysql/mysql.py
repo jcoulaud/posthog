@@ -50,6 +50,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql
     BacktickIdentifierQuoter,
     Column,
     InvalidIdentifierError,
+    SafeSQL,
     SelectQueryBuilder,
     Table,
     ValidatedRowFilter,
@@ -67,7 +68,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.keyset import (
     KeysetResumeState,
     iter_keyset_pages,
-    keyset_resume_column,
+    resolve_keyset_eligibility,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.location import (
     normalize_namespace,
@@ -798,16 +799,18 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
         config: MySQLSourceConfig,
         *,
         read_timeout: int | None = None,
+        autocommit: bool = False,
     ) -> Iterator[pymysql.Connection]:
         """Open a pymysql connection for the duration of the context.
 
         Opens the SSH tunnel (if configured), then connects with the
         MySQL-wide conventions: safe date/datetime converters, and a
         PlanetScale workload hint injected automatically when the host
-        resolves to a `*.psdb.cloud` address. Callers only vary one
-        thing — the streaming path sets `read_timeout=STATEMENT_TIMEOUT_SECONDS`
+        resolves to a `*.psdb.cloud` address. Callers vary two things —
+        the streaming path sets `read_timeout=STATEMENT_TIMEOUT_SECONDS`
         so multi-GB filesorts don't drop on middlebox timeouts before the
-        first rows are ready.
+        first rows are ready, and the keyset path sets `autocommit` so each
+        page is its own transaction (see `_keyset_get_rows`).
         """
         ssl_ca: str | None = None
         if config.using_ssl:
@@ -823,6 +826,7 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
                 "connect_timeout": 10,
                 "ssl_ca": ssl_ca,
                 "conv": _MYSQL_SAFE_CONVERSIONS,
+                "autocommit": autocommit,
                 "init_command": "SET workload = 'OLAP';" if host.endswith("psdb.cloud") else None,
             }
             if read_timeout is not None:
@@ -1318,6 +1322,38 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
             # `find_index_for_cursor`.
             logger.debug(f"EXPLAIN raised an exception: {e}", exc_info=e)
 
+    def check_keyset_page_plan(self, cursor: Cursor, page_sql: SafeSQL, logger: FilteringBoundLogger) -> None:
+        """Warn when a keyset page isn't reading the clustered index in key order.
+
+        A seek page is only cheap if the optimizer answers it as a range scan on `PRIMARY`: one
+        B-tree descent, then `LIMIT n` rows already in `ORDER BY` order. Row filters give it another
+        choice — take the filter's secondary index, lose the index ordering, and sort the whole
+        matched set — and that filesort runs *per page*, turning one table scan into thousands.
+
+        Diagnostics only: log a stable token so the bad-plan rate is greppable, and let the page run.
+        The streaming path's `FORCE INDEX` retry is the hammer if this turns out to be common.
+        """
+        try:
+            cursor.execute(f"EXPLAIN {page_sql.sql}", page_sql.params)
+            rows = cursor.fetchall()
+            column_names = [column[0] for column in cursor.description or []]
+            plans = [dict(zip(column_names, row)) for row in rows]
+        except Exception as e:
+            # Best-effort, exactly like `explain_query`: a failed EXPLAIN must never fail the page.
+            logger.debug(f"Keyset EXPLAIN raised an exception: {e}", exc_info=e)
+            return
+
+        for plan in plans:
+            index_used = plan.get("key")
+            extra = str(plan.get("Extra") or "")
+            sorts = "Using filesort" in extra or "Using temporary" in extra
+            if index_used == "PRIMARY" and not sorts:
+                continue
+            logger.warning(
+                f"Keyset page not served by the primary key: reason=bad_keyset_plan "
+                f"key={index_used} type={plan.get('type')} rows={plan.get('rows')} extra='{extra}'"
+            )
+
     # ------------------------------------------------------------------
     # Pipeline build — the dlt `SourceResponse` for a single table
     # ------------------------------------------------------------------
@@ -1396,11 +1432,17 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
         # instead of one long streaming cursor, which makes it resumable across pods. Incremental syncs
         # already resume from their watermark, and keyless/composite/non-orderable tables fall through
         # to the streaming path below.
-        keyset_column = keyset_resume_column(
+        eligibility = resolve_keyset_eligibility(
             primary_keys=primary_keys,
             arrow_schema=arrow_schema,
             should_use_incremental_field=should_use_incremental_field,
         )
+        keyset_column = eligibility.column
+        if keyset_column is None:
+            # Logged for every ineligible table so the ineligible share (and its breakdown) is
+            # measurable before keyset pagination is extended to the other SQL dialects.
+            logger.info(f"MySQL keyset resume unavailable: reason={eligibility.reason}")
+
         if keyset_column is not None and resumable_source_manager is not None:
             manager = resumable_source_manager
 
@@ -1411,10 +1453,24 @@ class MySQLImplementation(SQLSourceImplementation[MySQLSourceConfig, pymysql.Con
                     initial_last_value = state.last_key
                     logger.debug(f"MySQL keyset resume: {keyset_column} > {initial_last_value}")
 
-                with self.connect(config, read_timeout=STATEMENT_TIMEOUT_SECONDS) as connection:
+                # Autocommit: each page is its own transaction, so the load never holds a read view
+                # (and the metadata lock that blocks DDL) across the whole table the way the
+                # streaming cursor does. A resume on a fresh pod starts a new snapshot regardless, so
+                # there is no cross-page consistency here to give up — and the delta merge dedupes by
+                # primary key if a row shifts between pages.
+                with self.connect(config, read_timeout=STATEMENT_TIMEOUT_SECONDS, autocommit=True) as connection:
+                    plan_checked = False
 
-                    def _run_page(page_sql: Any) -> pa.Table | None:
+                    def _run_page(page_sql: SafeSQL) -> pa.Table | None:
+                        nonlocal plan_checked
                         with connection.cursor() as cursor:
+                            # Check the first page that actually seeks — page 1 has no `pk >`
+                            # predicate, so its plan says nothing about how the walk will behave.
+                            seeks = isinstance(page_sql.params, dict) and "keyset_value" in page_sql.params
+                            if not plan_checked and seeks:
+                                plan_checked = True
+                                self.check_keyset_page_plan(cursor, page_sql, logger)
+
                             cursor.execute(page_sql.sql, page_sql.params)
                             rows = cursor.fetchall()
                             if not rows:

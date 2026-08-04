@@ -10,7 +10,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.keyset import (
     is_orderable_keyset_type,
     iter_keyset_pages,
-    keyset_resume_column,
+    resolve_keyset_eligibility,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.query_builder import SelectQueryBuilder
 
@@ -44,40 +44,33 @@ def test_is_orderable_keyset_type(arrow_type, expected):
     assert is_orderable_keyset_type(arrow_type) is expected
 
 
-def test_single_orderable_pk_full_load_is_eligible():
-    assert keyset_resume_column(primary_keys=["id"], arrow_schema=_SCHEMA, should_use_incremental_field=False) == "id"
-
-
-def test_timestamp_pk_is_eligible():
-    assert (
-        keyset_resume_column(primary_keys=["created_at"], arrow_schema=_SCHEMA, should_use_incremental_field=False)
-        == "created_at"
+@pytest.mark.parametrize(
+    "primary_keys,incremental,expected_column,expected_reason",
+    [
+        (["id"], False, "id", None),
+        (["created_at"], False, "created_at", None),
+        (["amount"], False, "amount", None),
+        # Incremental syncs already resume from their persisted watermark; keyset would double up.
+        (["id"], True, None, "incremental_sync"),
+        (None, False, None, "no_primary_key"),
+        ([], False, None, "no_primary_key"),
+        (["id", "created_at"], False, None, "composite_primary_key"),
+        # If the PK was projected out of the Arrow schema there's nothing to seek on.
+        (["missing"], False, None, "primary_key_not_projected"),
+        # A string/uuid PK sorts by collation, which can skip or duplicate rows across keyset pages.
+        (["uuid"], False, None, "non_orderable_type:string"),
+        (["active"], False, None, "non_orderable_type:bool"),
+    ],
+)
+def test_resolve_keyset_eligibility(primary_keys, incremental, expected_column, expected_reason):
+    eligibility = resolve_keyset_eligibility(
+        primary_keys=primary_keys,
+        arrow_schema=_SCHEMA,
+        should_use_incremental_field=incremental,
     )
 
-
-def test_incremental_sync_is_not_keyset_eligible():
-    # Incremental syncs already resume from their persisted watermark; keyset would double up.
-    assert keyset_resume_column(primary_keys=["id"], arrow_schema=_SCHEMA, should_use_incremental_field=True) is None
-
-
-@pytest.mark.parametrize("primary_keys", [None, [], ["id", "created_at"]])
-def test_missing_or_composite_pk_is_not_eligible(primary_keys):
-    assert (
-        keyset_resume_column(primary_keys=primary_keys, arrow_schema=_SCHEMA, should_use_incremental_field=False)
-        is None
-    )
-
-
-def test_string_pk_is_not_eligible():
-    # A string/uuid PK sorts by collation, which can skip or duplicate rows across keyset pages.
-    assert keyset_resume_column(primary_keys=["uuid"], arrow_schema=_SCHEMA, should_use_incremental_field=False) is None
-
-
-def test_pk_absent_from_projected_schema_is_not_eligible():
-    # If the PK was projected out of the Arrow schema there's nothing to seek on.
-    assert (
-        keyset_resume_column(primary_keys=["missing"], arrow_schema=_SCHEMA, should_use_incremental_field=False) is None
-    )
+    assert eligibility.column == expected_column
+    assert eligibility.reason == expected_reason
 
 
 _BUILDER = SelectQueryBuilder(quoter=BacktickIdentifierQuoter())
