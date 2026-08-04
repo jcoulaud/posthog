@@ -11,6 +11,7 @@ import {
   CONTEXT_WINDOW_OPTION_CATEGORY,
   deriveInitialConfig,
   FAST_MODE_OPTION_CATEGORY,
+  pickPreferredRunSelection,
 } from "@posthog/core/task-detail/previewConfig";
 import { useHostTRPCClient } from "@posthog/host-router/react";
 import {
@@ -29,6 +30,7 @@ import { logger } from "../../../shell/logger";
 import { useAuthStateValue } from "../../auth/store";
 import { useFeatureFlag } from "../../feature-flags/useFeatureFlag";
 import { useSettingsStore } from "../../settings/settingsStore";
+import { useTaskRunDefaults } from "./useTaskRunDefaults";
 
 const log = logger.scope("preview-config");
 
@@ -73,6 +75,8 @@ export function usePreviewConfig(adapter: Adapter): PreviewConfigResult {
   const abortRef = useRef<AbortController | null>(null);
   const prevAdapterRef = useRef<Adapter | null>(null);
   const hasHydrated = useSettingsStore((state) => state._hasHydrated);
+  const { defaults: runDefaults, isSettled: runDefaultsSettled } =
+    useTaskRunDefaults();
 
   useEffect(() => {
     if (!apiHost) return;
@@ -84,6 +88,10 @@ export function usePreviewConfig(adapter: Adapter): PreviewConfigResult {
     // isLoading initializes to true, so the picker stays loading until hydration
     // lands and the fetch below resolves.
     if (!hasHydrated) return;
+
+    // Same reasoning for the server-side defaults: resolving before they land
+    // would seat the picker on the built-in fallback and then jump.
+    if (!runDefaultsSettled) return;
 
     // A harness switch resets the saved selections so the new harness starts
     // on its default preset notch (and the slider face shows).
@@ -179,9 +187,64 @@ export function usePreviewConfig(adapter: Adapter): PreviewConfigResult {
           });
         }
 
-        // With no saved picks (fresh install or a harness switch), land on
-        // the ladder's middle notch so the slider face is the default view.
-        if (!lastUsedModel && !lastUsedReasoningEffort) {
+        // With no local pick (fresh install or a harness switch), the project or
+        // user preference stored server-side decides what the composer opens on,
+        // ahead of the ladder's middle notch.
+        const preferred = pickPreferredRunSelection(
+          runDefaults,
+          adapter,
+          getOptionByCategory(initial, "model"),
+          lastUsedModel,
+        );
+        if (preferred) {
+          const preferredSettings = {
+            defaultInitialTaskMode: "",
+            lastUsedInitialTaskMode: undefined,
+            defaultReasoningEffort,
+            lastUsedReasoningEffort,
+            lastUsedContextWindow,
+            lastUsedFastMode,
+          };
+          initial = applyConfigChange(initial, {
+            adapter,
+            configId: getOptionByCategory(initial, "model")?.id ?? "model",
+            value: preferred.model,
+            effortOptions:
+              getReasoningEffortOptions(adapter, preferred.model) ?? undefined,
+            contextWindowOptions:
+              getContextWindowOptions(adapter, preferred.model) ?? undefined,
+            fastModeOptions: fastModeFlagEnabled
+              ? (getFastModeOptions(adapter, preferred.model) ?? undefined)
+              : undefined,
+            settings: preferredSettings,
+          });
+          // The stored effort belongs to whatever model the preference names; the
+          // model swap above may have narrowed the tiers, so only carry it when
+          // it survives. Otherwise the model's own default effort stands.
+          const preferredThoughtOpt = getOptionByCategory(
+            initial,
+            "thought_level",
+          );
+          if (
+            preferred.reasoningEffort &&
+            preferredThoughtOpt &&
+            flattenConfigValues(preferredThoughtOpt).includes(
+              preferred.reasoningEffort,
+            )
+          ) {
+            initial = applyConfigChange(initial, {
+              adapter,
+              configId: preferredThoughtOpt.id,
+              value: preferred.reasoningEffort,
+              effortOptions: undefined,
+              settings: preferredSettings,
+            });
+          }
+        }
+
+        // With no saved picks and no server-side preference, land on the ladder's
+        // middle notch so the slider face is the default view.
+        if (!preferred && !lastUsedModel && !lastUsedReasoningEffort) {
           const ladder = getCapabilityLadder(adapter);
           const middle = ladder[Math.floor((ladder.length - 1) / 2)];
           const midModelOpt = getOptionByCategory(initial, "model");
@@ -244,6 +307,8 @@ export function usePreviewConfig(adapter: Adapter): PreviewConfigResult {
     glmEnabled,
     kimiEnabled,
     fastModeFlagEnabled,
+    runDefaults,
+    runDefaultsSettled,
   ]);
 
   const setConfigOption = useCallback(
