@@ -833,8 +833,8 @@ class TestKeysetReadPath:
 
     @classmethod
     def _drain_keyset(cls, manager):
-        source = cls._keyset_source(manager)
-        return list(source.items())  # type: ignore[arg-type]  # MySQL source is always sync
+        # The keyset MySQL source always yields a sync generator of Arrow tables.
+        return list(cast(Generator, cls._keyset_source(manager).items()))
 
     @staticmethod
     def _fake_manager():
@@ -875,11 +875,11 @@ class TestKeysetReadPath:
         # A draining worker stops consuming mid-table: the checkpoint has to survive so the next pod
         # resumes from it instead of restarting the load from row 0.
         manager = self._fake_manager()
-        items = self._keyset_source(manager).items()
+        items = cast(Generator, self._keyset_source(manager).items())
 
-        next(items)  # type: ignore[arg-type]  # MySQL source is always sync
-        next(items)  # type: ignore[arg-type]
-        items.close()  # type: ignore[union-attr]
+        next(items)
+        next(items)
+        items.close()
 
         assert manager.save_state.call_count == 1
         manager.clear_state.assert_not_called()
