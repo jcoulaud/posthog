@@ -106,6 +106,7 @@ export function FreeformCanvasView({
   const [textSelection, setTextSelection] =
     useState<CanvasTextSelection | null>(null);
   const collapsed = useCanvasChatPanelStore((s) => s.collapsed);
+  const panelTab = useCanvasChatPanelStore((s) => s.tab);
   const setCollapsed = useCanvasChatPanelStore((s) => s.setCollapsed);
   const panelWidth = useCanvasChatPanelStore((s) => s.width);
   const setPanelWidth = useCanvasChatPanelStore((s) => s.setWidth);
@@ -444,6 +445,8 @@ export function FreeformCanvasView({
   // or while the generating default holds (any mode).
   const showPanel =
     (interactive && (hasContent || !!effectiveTaskId)) || generatingPanelOpen;
+  const showCommentsPanel =
+    panelTab === "comments" && !collapsed && !!commentTaskId;
   // Build failures/progress surface in view mode too — the toolbar renders
   // there only while it has something to say.
   const hasBuildSignal =
@@ -750,7 +753,7 @@ export function FreeformCanvasView({
         </Box>
       </Flex>
 
-      {showPanel && (
+      {(showPanel || showCommentsPanel) && (
         <ResizableSidebar
           open={(!collapsed || generatingPanelOpen) && !waitingForHeroExit}
           width={panelWidth}
