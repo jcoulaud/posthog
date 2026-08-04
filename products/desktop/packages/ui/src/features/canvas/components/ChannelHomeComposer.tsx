@@ -1,6 +1,4 @@
-import { FolderOpenIcon, GithubLogoIcon } from "@phosphor-icons/react";
 import { isValidConfigValue } from "@posthog/core/task-detail/configOptions";
-import { Button } from "@posthog/quill";
 import { ANALYTICS_EVENTS } from "@posthog/shared/analytics-events";
 import type { Task } from "@posthog/shared/domain-types";
 import { useQueryClient } from "@tanstack/react-query";
@@ -37,7 +35,10 @@ import { channelFeedQueryKey } from "../hooks/useChannelFeed";
 import { useGenerateFreeformCanvas } from "../hooks/useGenerateFreeformCanvas";
 import { useUpdateTaskChannelRepositories } from "../hooks/useTaskChannels";
 import type { PendingKickoff } from "./ChannelFeedView";
-import { TaskRepositoryDialog } from "./TaskRepositoryDialog";
+import {
+  TaskRepositoryAttachment,
+  TaskRepositoryDialog,
+} from "./TaskRepositoryDialog";
 
 export interface ChannelHomeComposerHandle {
   /** Drop a starter prompt into the editor and apply its mode, if any. */
@@ -413,25 +414,6 @@ export const ChannelHomeComposer = forwardRef<
             size="1"
             disabled={isBusy}
           />
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={isBusy}
-            onClick={() => setRepositoryDialogOpen(true)}
-          >
-            {workspaceMode === "cloud" ? (
-              <GithubLogoIcon size={14} />
-            ) : (
-              <FolderOpenIcon size={14} />
-            )}
-            {workspaceMode === "cloud"
-              ? taskRepositories.length > 0
-                ? `${taskRepositories.length} ${taskRepositories.length === 1 ? "repository" : "repositories"}`
-                : "Add repository…"
-              : taskFolder
-                ? "Folder selected"
-                : "Select folder…"}
-          </Button>
         </div>
       )}
 
@@ -469,6 +451,17 @@ export const ChannelHomeComposer = forwardRef<
         isLoading={isBusy}
         autoFocus
         clearOnSubmit={false}
+        attachmentsPrefix={
+          !canvasArmed ? (
+            <TaskRepositoryAttachment
+              cloud={workspaceMode === "cloud"}
+              repositoryCount={taskRepositories.length}
+              hasFolder={!!taskFolder}
+              disabled={isBusy}
+              onOpen={() => setRepositoryDialogOpen(true)}
+            />
+          ) : undefined
+        }
         submitDisabledExternal={
           canvasArmed
             ? editorIsEmpty || isBusy || !isOnline

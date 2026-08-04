@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@posthog/quill";
 import { FolderPicker } from "@posthog/ui/features/folder-picker/FolderPicker";
+import { Attachment } from "@posthog/ui/features/message-editor/components/Attachment";
 import { useEffect, useState } from "react";
 import { RepositoriesField } from "./RepositoriesField";
 
@@ -27,6 +28,43 @@ interface TaskRepositoryDialogProps {
     folder: string;
     saveToSpace: boolean;
   }) => void;
+}
+
+export function TaskRepositoryAttachment({
+  cloud,
+  repositoryCount,
+  hasFolder,
+  disabled,
+  onOpen,
+}: {
+  cloud: boolean;
+  repositoryCount: number;
+  hasFolder: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+}) {
+  const label = cloud
+    ? repositoryCount > 0
+      ? `${repositoryCount} ${repositoryCount === 1 ? "repository" : "repositories"}`
+      : "Add repositories"
+    : hasFolder
+      ? "Folder selected"
+      : "Select folder";
+
+  return (
+    <Attachment
+      label={label}
+      hint={disabled ? undefined : "Click to change"}
+      preview={
+        cloud ? (
+          <GithubLogoIcon size={16} />
+        ) : (
+          <FolderOpenIcon size={16} />
+        )
+      }
+      onOpen={disabled ? undefined : onOpen}
+    />
+  );
 }
 
 export function TaskRepositoryDialog({

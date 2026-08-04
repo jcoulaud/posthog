@@ -15,6 +15,11 @@ import { useHostTRPC, useHostTRPCClient } from "@posthog/host-router/react";
 import { ButtonGroup } from "@posthog/quill";
 import { type AgentRuntime, ANALYTICS_EVENTS } from "@posthog/shared";
 import type { Task } from "@posthog/shared/domain-types";
+import {
+  TaskRepositoryAttachment,
+  TaskRepositoryDialog,
+} from "@posthog/ui/features/canvas/components/TaskRepositoryDialog";
+import { useUpdateTaskChannelRepositories } from "@posthog/ui/features/canvas/hooks/useTaskChannels";
 import { openSettings } from "@posthog/ui/features/settings/hooks/useOpenSettings";
 import type { TaskInputReportAssociation } from "@posthog/ui/features/task-detail/stores/taskInputPrefillStore";
 import { useTaskInputPrefillStore } from "@posthog/ui/features/task-detail/stores/taskInputPrefillStore";
@@ -133,6 +138,8 @@ interface TaskInputProps {
    * needs a repo and attaches one lazily.
    */
   allowNoRepo?: boolean;
+  channelRepositories?: string[];
+  channelGithubIntegration?: number | null;
   /**
    * Channels new-task starter prompts. When provided, a column of suggestion
    * cards renders below the input while it's empty; clicking one fills the
@@ -168,6 +175,8 @@ export function TaskInput({
   channelId,
   channelContextId,
   allowNoRepo,
+  channelRepositories = [],
+  channelGithubIntegration = null,
   suggestions,
   onSuggestionSelect,
   onContextChipClick,
@@ -192,6 +201,20 @@ export function TaskInput({
   );
   const selectedDirectory = useActiveRepoStore((s) => s.path);
   const setSelectedDirectory = useActiveRepoStore((s) => s.setPath);
+  const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
+  const [taskRepositories, setTaskRepositories] = useState(channelRepositories);
+  const [taskGithubIntegration, setTaskGithubIntegration] = useState<
+    number | null
+  >(channelGithubIntegration);
+  const [taskFolder, setTaskFolder] = useState("");
+  const updateChannelRepositories = useUpdateTaskChannelRepositories();
+  const channelRepositoriesKey = channelRepositories.join("\n");
+  useEffect(() => {
+    setTaskRepositories(
+      channelRepositoriesKey ? channelRepositoriesKey.split("\n") : [],
+    );
+    setTaskGithubIntegration(channelGithubIntegration);
+  }, [channelRepositoriesKey, channelGithubIntegration]);
   // Inline file preview opened from the command palette's file search.
   const previewFile = useFileSearchStore((s) => s.previewFile);
   const closePreviewFile = useFileSearchStore((s) => s.closePreview);
@@ -927,8 +950,14 @@ export function TaskInput({
   } = useTaskCreation({
     editorRef,
     sessionId,
-    selectedDirectory,
+    selectedDirectory: allowNoRepo ? taskFolder : selectedDirectory,
     selectedRepository: selectedCloudRepository,
+    repositories:
+      allowNoRepo && workspaceMode === "cloud" ? taskRepositories : undefined,
+    githubIntegrationId:
+      allowNoRepo && workspaceMode === "cloud"
+        ? (taskGithubIntegration ?? undefined)
+        : undefined,
     githubUserIntegrationId: selectedGithubUserIntegrationId,
     workspaceMode: effectiveWorkspaceMode,
     branch: branchForTaskCreation,
@@ -1389,12 +1418,25 @@ export function TaskInput({
                   }
                   tourTarget="task-input"
                   attachmentsPrefix={
-                    includeChannelContext ? (
-                      <ChannelContextChip
-                        channelName={channelName}
-                        onView={onContextChipClick}
-                        onRemove={() => setChannelContextDismissed(true)}
-                      />
+                    includeChannelContext || allowNoRepo ? (
+                      <>
+                        {includeChannelContext && (
+                          <ChannelContextChip
+                            channelName={channelName}
+                            onView={onContextChipClick}
+                            onRemove={() => setChannelContextDismissed(true)}
+                          />
+                        )}
+                        {allowNoRepo && (
+                          <TaskRepositoryAttachment
+                            cloud={workspaceMode === "cloud"}
+                            repositoryCount={taskRepositories.length}
+                            hasFolder={!!taskFolder}
+                            disabled={isCreatingTask}
+                            onOpen={() => setRepositoryDialogOpen(true)}
+                          />
+                        )}
+                      </>
                     ) : undefined
                   }
                   repoPath={selectedDirectory}
@@ -1567,6 +1609,33 @@ export function TaskInput({
           </Flex>
         </Box>
       </Flex>
+
+      {allowNoRepo && (
+        <TaskRepositoryDialog
+          open={repositoryDialogOpen}
+          onOpenChange={setRepositoryDialogOpen}
+          cloud={workspaceMode === "cloud"}
+          repositories={taskRepositories}
+          integrationId={taskGithubIntegration}
+          folder={taskFolder}
+          onApply={(selection) => {
+            setTaskRepositories(selection.repositories);
+            setTaskGithubIntegration(selection.integrationId);
+            setTaskFolder(selection.folder);
+            if (
+              selection.saveToSpace &&
+              channelId &&
+              workspaceMode === "cloud"
+            ) {
+              updateChannelRepositories.mutate({
+                channelId,
+                githubIntegration: selection.integrationId,
+                repositories: selection.repositories,
+              });
+            }
+          }}
+        />
+      )}
 
       <GitBranchDialog
         open={branchOpen}

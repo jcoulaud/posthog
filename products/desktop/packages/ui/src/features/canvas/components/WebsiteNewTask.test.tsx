@@ -35,13 +35,13 @@ vi.mock("@posthog/ui/features/task-detail/components/TaskInput", () => ({
   },
 }));
 
-vi.mock("@posthog/ui/features/canvas/hooks/useChannels", () => ({
-  useChannels: () => ({
+vi.mock("@posthog/ui/features/canvas/hooks/useTaskChannels", () => ({
+  useTaskChannels: () => ({
     channels: [
       {
         id: "chan-1",
         name: "project-bluebird",
-        channelType: "public",
+        channel_type: "public",
         starred: false,
       },
     ],
